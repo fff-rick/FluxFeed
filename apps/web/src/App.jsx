@@ -11,10 +11,10 @@ const DEFAULT_PLAYBACK_CONFIG = {
   buffer_ms: 1200
 };
 const FEED_SCENES = [
-  { key: "timeline", label: "最新视频", route: "/timeline", icon: "home" },
-  { key: "recommend", label: "推荐流", route: "/recommend", icon: "auto_awesome" },
-  { key: "following", label: "关注流", route: "/following", icon: "subscriptions" },
-  { key: "hot", label: "热门榜单", route: "/hotfeed", icon: "local_fire_department" }
+  { key: "timeline", label: "最新", route: "/timeline", icon: "home" },
+  { key: "recommend", label: "发现", route: "/recommend", icon: "explore" },
+  { key: "following", label: "关注", route: "/following", icon: "group" },
+  { key: "hot", label: "热门", route: "/hotfeed", icon: "local_fire_department" }
 ];
 
 const image = {
@@ -213,27 +213,29 @@ function AeroShards() {
   );
 }
 
-function DriftWall({ items, onOpenAuthor }) {
+function DriftWall({ items, title = "最新视频", subtitle = "发现创作者们分享的精彩瞬间", onOpenAuthor }) {
+  const [playing, setPlaying] = useState(null);
   const wallItems = items.length ? items : [];
   return (
     <div className="timeline-drift-shell">
       <div className="timeline-heading">
-        <div><span className="eyebrow">FRESH DROP</span><h1>最新视频</h1><p>刚刚发生，也刚刚被记录。</p></div>
-        <span className="timeline-live"><i /> LIVE FEED</span>
+        <div><h1>{title}</h1><p>{subtitle}</p></div>
+        <span className="timeline-more">查看更多 <span>→</span></span>
       </div>
       <div className="drift-viewport">
         <div className="drift-wall">
           {[0, 1, 2].map((column) => (
             <div className={`drift-column drift-column-${column + 1}`} key={column}>
               {[...wallItems, ...wallItems].filter((_, index) => index % 3 === column).map((item, index) => (
-                <article className="drift-card" key={`${column}-${item.video_id}-${index}`}>
-                  <img src={item.cover_url || image.stage} alt="" />
+                <article className="drift-card" key={`${column}-${item.video_id}-${index}`} onClick={() => setPlaying(item)}>
+                  <img src={item.cover_url || image.stage} alt={item.title || "视频封面"} />
                   <div className="drift-card-shade" />
+                  <span className="drift-play"><span className="material-symbols-outlined filled">play_arrow</span></span>
                   <div className="drift-card-copy">
                     <strong>{item.title || "FluxFeed Moment"}</strong>
-                    <button onClick={() => onOpenAuthor(item)}>
+                    <button onClick={(event) => { event.stopPropagation(); onOpenAuthor(item); }}>
                       <img src={item.avatar_url || image.creator} alt="" />
-                      <span>{item.author_nickname || item.author_name || `创作者 ${item.author_id}`}</span>
+                      <span>{item.author || `创作者 ${item.author_id}`}</span>
                     </button>
                   </div>
                   <span className="drift-stat"><span className="material-symbols-outlined filled">favorite</span>{item.like_count || 0}</span>
@@ -243,10 +245,22 @@ function DriftWall({ items, onOpenAuthor }) {
           ))}
         </div>
       </div>
+      {playing && (
+        <div className="video-lightbox" onClick={() => setPlaying(null)}>
+          <div className="video-lightbox-card" onClick={(event) => event.stopPropagation()}>
+            <button className="video-lightbox-close" onClick={() => setPlaying(null)} aria-label="关闭">×</button>
+            {isVideoSource(playing.media_url) ? (
+              <video src={playing.media_url} poster={playing.cover_url || image.stage} controls autoPlay playsInline />
+            ) : (
+              <img src={playing.media_url || playing.cover_url || image.stage} alt="" />
+            )}
+            <div className="video-lightbox-meta"><h2>{playing.title || "FluxFeed Moment"}</h2><p>{playing.description || `来自 ${playing.author || "FluxFeed 创作者"}`}</p></div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
-
 function LoginPage({ session, onNavigate }) {
   const [mode, setMode] = useState("login");
   const [form, setForm] = useState({ account: "", password: "", nickname: "" });
@@ -1043,8 +1057,13 @@ function FeedPage({ feedScene, session, onNavigate }) {
         onPointerUp={handlePointerEnd}
         onPointerCancel={handlePointerEnd}
       >
-        {feedScene === "timeline" && feedState === "ready" && items.length > 0 ? (
-          <DriftWall items={items} onOpenAuthor={(author) => openPublicProfile(author, onNavigate)} />
+        {feedState === "ready" && items.length > 0 ? (
+          <DriftWall
+            items={items}
+            title={currentFeedScene.label === "最新" ? "最新视频" : currentFeedScene.label}
+            subtitle={feedScene === "timeline" ? "发现创作者们分享的精彩瞬间" : feedScene === "recommend" ? "为你发现值得停留的内容" : feedScene === "following" ? "看看你关注的创作者最近分享了什么" : "正在被大家喜欢的热门内容"}
+            onOpenAuthor={(author) => openPublicProfile(author, onNavigate)}
+          />
         ) : <>
         {feedState === "loading" && <FeedMessage icon="hourglass_top" title={`正在加载${currentFeedScene.label}`} />}
         {feedState === "auth" && (
