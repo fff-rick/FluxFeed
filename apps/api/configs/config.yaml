@@ -1,0 +1,32 @@
+port: 8080
+jwt:
+  secret: "replace-with-strong-secret"
+  access_ttl: "15m"
+
+internal:
+  token: "replace-with-internal-token"
+
+database:
+  host: "localhost"
+  port: 3306
+  user: "root"
+  password: "sealos123"
+  name: "FluxFeed"
+
+redis:
+  addr: "localhost:6379"
+  password: ""
+  db: 0
+
+rabbitmq:
+  url: "amqp://guest:guest@localhost:5672/"
+  interaction_exchange: "fluxfeed.interaction"
+  action_changed_queue: "fluxfeed.interaction.action_changed"
+  action_changed_routing: "interaction.action_changed"
+  video_exchange: "fluxfeed.video"
+  video_published_queue: "fluxfeed.video.published"
+  video_embedding_queue: "fluxfeed.video.embedding"
+  video_published_routing: "video.published"
+  exposure_exchange: "fluxfeed.exposure"
+  view_event_recorded_queue: "fluxfeed.exposure.view_event_recorded"
+  view_event_recorded_routing: "exposure.view_event_recorded"
