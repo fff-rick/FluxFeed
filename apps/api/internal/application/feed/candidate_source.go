@@ -7,12 +7,58 @@ import (
 	"errors"
 	"strings"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 )
 
 // CandidateSource 只负责“从哪里取候选”，不负责卡片组装和 HTTP 输出。
 // Strategy 负责场景策略，CandidateSource 负责数据来源，两者解耦后可以独立扩展召回源。
 type CandidateSource interface {
 	Load(ctx context.Context, req FeedRequest, limit int) (*FeedPage, error)
+}
+
+// loadCandidatePages 并行执行多路召回，并按 sources 的注册顺序返回结果。
+func loadCandidatePages(ctx context.Context, req FeedRequest, limit int, sources ...CandidateSource) ([]*FeedPage, error) {
+	pages := make([]*FeedPage, len(sources))
+	group, groupCtx := errgroup.WithContext(ctx)
+	for index, source := range sources {
+		if source == nil {
+			continue
+		}
+		index, source := index, source
+		group.Go(func() error {
+			page, err := source.Load(groupCtx, req, limit)
+			if err == nil {
+				pages[index] = page
+			}
+			return err
+		})
+	}
+	if err := group.Wait(); err != nil {
+		return nil, err
+	}
+	return pages, nil
+}
+
+// firstPageOnlySource 让辅助召回源只参与推荐首屏，避免复用主召回游标时语义冲突。
+type firstPageOnlySource struct{ CandidateSource }
+
+func (s firstPageOnlySource) Load(ctx context.Context, req FeedRequest, limit int) (*FeedPage, error) {
+	if strings.TrimSpace(req.Cursor) != "" {
+		return &FeedPage{Scene: req.Scene, Items: []*domainfeed.FeedPageItem{}}, nil
+	}
+	return s.CandidateSource.Load(ctx, req, limit)
+}
+
+// optionalCandidateSource 将辅助召回故障降级为空结果，主召回仍负责请求成败。
+type optionalCandidateSource struct{ CandidateSource }
+
+func (s optionalCandidateSource) Load(ctx context.Context, req FeedRequest, limit int) (*FeedPage, error) {
+	page, err := s.CandidateSource.Load(ctx, req, limit)
+	if err != nil && ctx.Err() == nil {
+		return &FeedPage{Scene: req.Scene, Items: []*domainfeed.FeedPageItem{}}, nil
+	}
+	return page, err
 }
 
 type TimelineCandidateSource struct {
@@ -107,16 +153,38 @@ func (s *FollowingCandidateSource) Load(ctx context.Context, req FeedRequest, li
 	}
 	var items []*domainfeed.FeedPageItem
 	if s.index != nil {
-		authorIDs, e := s.repo.ListFollowingPullAuthorIDs(ctx, req.ViewerID)
-		if e != nil {
-			return nil, ErrLoadFeedFailed
+		oldest, complete, ready, cacheErr := s.index.GetFollowingSnapshot(ctx, req.ViewerID)
+		if cacheErr == nil && !ready {
+			// Cold start loads the bounded index from the SQL source of truth.
+			snapshot, err := s.repo.ListFollowingPage(ctx, req.ViewerID, nil, 1001)
+			if err != nil {
+				return nil, ErrLoadFeedFailed
+			}
+			complete = len(snapshot) <= 1000
+			if len(snapshot) > 1000 {
+				snapshot = snapshot[:1000]
+			}
+			if s.index.BootstrapFollowingIndex(ctx, req.ViewerID, snapshot, complete) == nil {
+				ready = true
+				if len(snapshot) > 0 {
+					last := snapshot[len(snapshot)-1]
+					oldest = &domainfeed.TimelineCursor{PublishedAt: last.PublishedAt, VideoID: last.VideoID}
+				}
+			}
 		}
-		loaded, ok, e := s.index.ListFollowingIndexPage(ctx, req.ViewerID, authorIDs, cursor, limit+1)
-		if e != nil {
-			return nil, ErrLoadFeedFailed
-		}
-		if ok {
-			items = loaded
+		if cacheErr == nil && ready && (complete || !timelineCursorAtOrBefore(cursor, oldest)) {
+			authorIDs, err := s.repo.ListFollowingAuthorIDs(ctx, req.ViewerID)
+			if err != nil {
+				return nil, ErrLoadFeedFailed
+			}
+			pullAuthorIDs, err := s.repo.ListFollowingPullAuthorIDs(ctx, req.ViewerID)
+			if err != nil {
+				return nil, ErrLoadFeedFailed
+			}
+			loaded, ok, err := s.index.ListFollowingIndexPage(ctx, req.ViewerID, authorIDs, pullAuthorIDs, oldest != nil, cursor, limit+1)
+			if err == nil && ok {
+				items = loaded
+			}
 		}
 	}
 	if items == nil {
@@ -126,6 +194,14 @@ func (s *FollowingCandidateSource) Load(ctx context.Context, req FeedRequest, li
 		}
 	}
 	return timelinePage(domainfeed.SceneFollowing, items, limit), nil
+}
+
+func timelineCursorAtOrBefore(cursor *domainfeed.TimelineCursor, oldest *domainfeed.TimelineCursor) bool {
+	if cursor == nil || oldest == nil {
+		return false
+	}
+	return cursor.PublishedAt.Before(oldest.PublishedAt) ||
+		(cursor.PublishedAt.Equal(oldest.PublishedAt) && cursor.VideoID <= oldest.VideoID)
 }
 
 type RecommendCandidateSource struct{ recommender Recommender }

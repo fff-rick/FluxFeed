@@ -51,19 +51,23 @@ func (r *memoryFanoutRepo) BatchGetFeedStats(ctx context.Context, videoIDs []int
 type memoryFollowingIndex struct {
 	inboxUsers    []int64
 	inboxVideoID  int64
+	inboxMaxLen   int64
 	outboxAuthor  int64
 	outboxVideoID int64
+	outboxMaxLen  int64
 }
 
 func (i *memoryFollowingIndex) AddInboxItems(ctx context.Context, authorID int64, userIDs []int64, item *domainfeed.FeedPageItem, maxLen int64) error {
 	i.inboxUsers = append(i.inboxUsers, userIDs...)
 	i.inboxVideoID = item.VideoID
+	i.inboxMaxLen = maxLen
 	return nil
 }
 
 func (i *memoryFollowingIndex) AddAuthorOutboxItem(ctx context.Context, authorID int64, item *domainfeed.FeedPageItem, maxLen int64) error {
 	i.outboxAuthor = authorID
 	i.outboxVideoID = item.VideoID
+	i.outboxMaxLen = maxLen
 	return nil
 }
 
@@ -100,6 +104,9 @@ func TestFanoutWorkerPushesSmallCreatorInbox(t *testing.T) {
 	if index.outboxVideoID != 0 {
 		t.Fatalf("unexpected outbox fanout: %+v", index)
 	}
+	if index.inboxMaxLen != 1000 {
+		t.Fatalf("unexpected inbox capacity: %d", index.inboxMaxLen)
+	}
 	if preheater.videoID != 99 {
 		t.Fatalf("unexpected preheat video id: %d", preheater.videoID)
 	}
@@ -126,5 +133,8 @@ func TestFanoutWorkerWritesBigCreatorOutbox(t *testing.T) {
 	}
 	if index.outboxAuthor != 8 || index.outboxVideoID != 100 {
 		t.Fatalf("unexpected outbox fanout: %+v", index)
+	}
+	if index.outboxMaxLen != 500 {
+		t.Fatalf("unexpected outbox capacity: %d", index.outboxMaxLen)
 	}
 }

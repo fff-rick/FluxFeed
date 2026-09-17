@@ -2,6 +2,9 @@ package test
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
 	"net/http"
 	"sort"
 	"sync"
@@ -55,6 +58,7 @@ type memoryFeedRepo struct {
 	viewerActions            map[int64]map[int64]*domainfeed.ViewerActionState
 	followingCalls           int
 	followingPullAuthorCalls int
+	followingAuthorCalls     int
 }
 
 type memoryFeedCache struct {
@@ -65,6 +69,13 @@ type memoryFeedCache struct {
 	hotItems       []*domainfeed.FeedPageItem
 	followingInbox map[int64][]*domainfeed.FeedPageItem
 	authorOutbox   map[int64][]*domainfeed.FeedPageItem
+	snapshots      map[int64]memoryFollowingSnapshot
+	snapshotErr    error
+}
+
+type memoryFollowingSnapshot struct {
+	oldest   *domainfeed.TimelineCursor
+	complete bool
 }
 
 func newMemoryFeedRepo(items []*domainfeed.FeedItem) *memoryFeedRepo {
@@ -84,6 +95,7 @@ func newMemoryFeedCache() *memoryFeedCache {
 		stats:          map[int64]*domainfeed.FeedStat{},
 		followingInbox: map[int64][]*domainfeed.FeedPageItem{},
 		authorOutbox:   map[int64][]*domainfeed.FeedPageItem{},
+		snapshots:      map[int64]memoryFollowingSnapshot{},
 	}
 }
 
@@ -290,23 +302,66 @@ func (c *memoryFeedCache) ListHotWindowPage(ctx context.Context, windowEnd time.
 	return items[offset:end], nil
 }
 
-func (c *memoryFeedCache) ListFollowingIndexPage(ctx context.Context, viewerID int64, authorIDs []int64, cursor *domainfeed.TimelineCursor, limit int) ([]*domainfeed.FeedPageItem, bool, error) {
+func (c *memoryFeedCache) ListFollowingIndexPage(ctx context.Context, viewerID int64, authorIDs []int64, pullAuthorIDs []int64, expectInbox bool, cursor *domainfeed.TimelineCursor, limit int) ([]*domainfeed.FeedPageItem, bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	items := make([]*domainfeed.FeedPageItem, 0)
 	items = append(items, cloneFeedPageItems(c.followingInbox[viewerID])...)
-	for _, authorID := range authorIDs {
+	for _, authorID := range pullAuthorIDs {
 		items = append(items, cloneFeedPageItems(c.authorOutbox[authorID])...)
 	}
+	allowed := int64Set(authorIDs)
+	filtered := items[:0]
+	for _, item := range items {
+		if _, ok := allowed[item.AuthorID]; ok {
+			filtered = append(filtered, item)
+		}
+	}
+	items = filtered
 	if len(items) == 0 {
 		return nil, false, nil
 	}
 	items = filterAndSortTimelineItems(items, cursor)
+	unique := items[:0]
+	seen := map[int64]struct{}{}
+	for _, item := range items {
+		if _, ok := seen[item.VideoID]; ok {
+			continue
+		}
+		seen[item.VideoID] = struct{}{}
+		unique = append(unique, item)
+	}
+	items = unique
 	if limit > 0 && limit < len(items) {
 		items = items[:limit]
 	}
 	return items, true, nil
+}
+
+func (c *memoryFeedCache) GetFollowingSnapshot(_ context.Context, viewerID int64) (*domainfeed.TimelineCursor, bool, bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.snapshotErr != nil {
+		return nil, false, false, c.snapshotErr
+	}
+	snapshot, ok := c.snapshots[viewerID]
+	return snapshot.oldest, snapshot.complete, ok, nil
+}
+
+func (c *memoryFeedCache) BootstrapFollowingIndex(_ context.Context, viewerID int64, items []*domainfeed.FeedPageItem, complete bool) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, item := range items {
+		c.followingInbox[viewerID] = append(c.followingInbox[viewerID], cloneFeedPageItems([]*domainfeed.FeedPageItem{item})...)
+	}
+	var oldest *domainfeed.TimelineCursor
+	if len(items) > 0 {
+		last := items[len(items)-1]
+		oldest = &domainfeed.TimelineCursor{PublishedAt: last.PublishedAt, VideoID: last.VideoID}
+	}
+	c.snapshots[viewerID] = memoryFollowingSnapshot{oldest: oldest, complete: complete}
+	return nil
 }
 
 func (c *memoryFeedCache) AddInboxItemsForTest(userIDs []int64, item *domainfeed.FeedPageItem) {
@@ -404,6 +459,18 @@ func (r *memoryFeedRepo) ListFollowingPullAuthorIDs(ctx context.Context, viewerI
 	sort.Slice(authors, func(i, j int) bool {
 		return authors[i] < authors[j]
 	})
+	return authors, nil
+}
+
+func (r *memoryFeedRepo) ListFollowingAuthorIDs(ctx context.Context, viewerID int64) ([]int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.followingAuthorCalls++
+	authors := make([]int64, 0, len(r.following[viewerID]))
+	for authorID := range r.following[viewerID] {
+		authors = append(authors, authorID)
+	}
+	sort.Slice(authors, func(i, j int) bool { return authors[i] < authors[j] })
 	return authors, nil
 }
 
@@ -615,8 +682,68 @@ func TestFollowingFeedUsesRedisIndex(t *testing.T) {
 	if len(page.Items) != 2 || page.Items[0].VideoID != 4 || page.Items[1].VideoID != 2 || !page.HasMore {
 		t.Fatalf("unexpected following index page: %+v", page)
 	}
-	if repo.FollowingCalls() != 0 || repo.FollowingPullAuthorCalls() != 1 {
+	if repo.FollowingCalls() != 1 || repo.FollowingPullAuthorCalls() != 1 {
 		t.Fatalf("unexpected following repo calls: page=%d authors=%d", repo.FollowingCalls(), repo.FollowingPullAuthorCalls())
+	}
+}
+
+func TestFollowingIndexColdStartAndHistoricalFallback(t *testing.T) {
+	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	items := make([]*domainfeed.FeedItem, 1002)
+	for index := range items {
+		videoID := int64(index + 1)
+		items[index] = domainfeed.RestoreFeedItem(videoID, 100, "author", "", "video", "", "", "", 0, 0, 0, base.Add(time.Duration(index)*time.Second))
+	}
+	repo := newMemoryFeedRepo(items)
+	repo.FollowForTest(42, 100)
+	cache := newMemoryFeedCache()
+	service := applicationfeed.New(repo, applicationfeed.WithFeedCache(cache))
+	first, err := service.GetFeed(context.Background(), applicationfeed.FeedRequest{Scene: domainfeed.SceneFollowing, ViewerID: 42, Limit: 2})
+	if err != nil || len(first.Items) != 2 || first.Items[0].VideoID != 1002 || first.Items[1].VideoID != 1001 {
+		t.Fatalf("unexpected cold-start page: %+v, %v", first, err)
+	}
+	if repo.FollowingCalls() != 1 {
+		t.Fatalf("expected one cold-start SQL read, got %d", repo.FollowingCalls())
+	}
+	_, err = service.GetFeed(context.Background(), applicationfeed.FeedRequest{Scene: domainfeed.SceneFollowing, ViewerID: 42, Cursor: first.NextCursor, Limit: 2})
+	if err != nil || repo.FollowingCalls() != 1 {
+		t.Fatalf("expected warm index read, SQL calls=%d, err=%v", repo.FollowingCalls(), err)
+	}
+	oldest := items[2]
+	content, _ := json.Marshal(map[string]any{"published_at": oldest.PublishedAt.Format(time.RFC3339Nano), "video_id": oldest.VideoID})
+	cursor := base64.RawURLEncoding.EncodeToString(content)
+	history, err := service.GetFeed(context.Background(), applicationfeed.FeedRequest{Scene: domainfeed.SceneFollowing, ViewerID: 42, Cursor: cursor, Limit: 2})
+	if err != nil || len(history.Items) != 2 || history.Items[0].VideoID != 2 || history.Items[1].VideoID != 1 || repo.FollowingCalls() != 2 {
+		t.Fatalf("unexpected historical fallback: %+v, calls=%d, err=%v", history, repo.FollowingCalls(), err)
+	}
+}
+
+func TestFollowingIndexFailureFallsBackToSQL(t *testing.T) {
+	repo := newMemoryFeedRepo(seedFollowingFeedItems())
+	repo.FollowForTest(42, 100)
+	cache := newMemoryFeedCache()
+	cache.snapshotErr = errors.New("redis unavailable")
+	service := applicationfeed.New(repo, applicationfeed.WithFeedCache(cache))
+	page, err := service.GetFeed(context.Background(), applicationfeed.FeedRequest{Scene: domainfeed.SceneFollowing, ViewerID: 42, Limit: 2})
+	if err != nil || len(page.Items) == 0 || repo.FollowingCalls() != 1 {
+		t.Fatalf("expected SQL fallback: page=%+v calls=%d err=%v", page, repo.FollowingCalls(), err)
+	}
+}
+
+func TestFollowingIndexFiltersUnfollowedInbox(t *testing.T) {
+	repo := newMemoryFeedRepo(seedFollowingFeedItems())
+	repo.FollowForTest(42, 100)
+	cache := newMemoryFeedCache()
+	cache.AddInboxItemsForTest([]int64{42}, feedPageItemFromFeedItem(seedFollowingFeedItems()[2]))
+	service := applicationfeed.New(repo, applicationfeed.WithFeedCache(cache))
+	page, err := service.GetFeed(context.Background(), applicationfeed.FeedRequest{Scene: domainfeed.SceneFollowing, ViewerID: 42, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range page.Items {
+		if item.AuthorID != 100 {
+			t.Fatalf("unfollowed author leaked into feed: %+v", item)
+		}
 	}
 }
 

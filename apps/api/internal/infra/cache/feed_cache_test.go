@@ -1,14 +1,58 @@
 package infracache
 
 import (
+	domainfeed "FluxFeed/internal/domain/feed"
 	domaininteraction "FluxFeed/internal/domain/interaction"
 	"context"
 	"encoding/json"
+	"sort"
 	"testing"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 )
+
+func TestFollowingIndexMemberExactTimelineOrder(t *testing.T) {
+	at := time.Date(2026, 9, 17, 12, 0, 0, 123, time.UTC)
+	members := []string{
+		followingIndexMember(1, 7, at),
+		followingIndexMember(1_000_001, 7, at),
+		followingIndexMember(2, 7, at.Add(time.Nanosecond)),
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(members)))
+	want := []int64{2, 1_000_001, 1}
+	for index, member := range members {
+		item, ok := feedPageItemFromFollowingMember(member)
+		if !ok || item.VideoID != want[index] {
+			t.Fatalf("unexpected index member %q: %+v", member, item)
+		}
+	}
+	cursor := &domainfeed.TimelineCursor{PublishedAt: at, VideoID: 1_000_001}
+	if followingIndexMember(cursor.VideoID, 7, at) != followingIndexMember(cursor.VideoID, 7, at.In(time.FixedZone("CST", 8*3600))) {
+		t.Fatal("replayed publication must use the same ZSET member")
+	}
+	if !(members[1] > followingCursorPrefix(cursor) && members[2] < followingCursorPrefix(cursor)) {
+		t.Fatal("cursor boundary must exclude the current video and retain older videos")
+	}
+}
+
+func TestFollowingPageCapacityBoundary(t *testing.T) {
+	at := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	oldest := &domainfeed.FeedPageItem{VideoID: 1_000_001, PublishedAt: at}
+	for _, test := range []struct {
+		item *domainfeed.FeedPageItem
+		want bool
+	}{
+		{&domainfeed.FeedPageItem{VideoID: 1_000_002, PublishedAt: at}, false},
+		{&domainfeed.FeedPageItem{VideoID: 1_000_001, PublishedAt: at}, true},
+		{&domainfeed.FeedPageItem{VideoID: 1, PublishedAt: at}, true},
+		{&domainfeed.FeedPageItem{VideoID: 2_000_000, PublishedAt: at.Add(-time.Nanosecond)}, true},
+	} {
+		if got := followingPageTouchesBoundary(test.item, oldest); got != test.want {
+			t.Fatalf("boundary decision for %+v: got %v, want %v", test.item, got, test.want)
+		}
+	}
+}
 
 type actionStatFakeRedis struct {
 	hashes map[string]map[string]string

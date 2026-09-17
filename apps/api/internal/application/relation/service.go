@@ -32,6 +32,7 @@ type FollowFeedBackfiller interface {
 	CountFollowers(ctx context.Context, authorID int64) (int, error)
 	ListAuthorRecentVideos(ctx context.Context, authorID int64, limit int) ([]*domainfeed.FeedPageItem, error)
 	AddInboxItems(ctx context.Context, authorID int64, userIDs []int64, item *domainfeed.FeedPageItem, maxLen int64) error
+	InvalidateFollowingIndex(ctx context.Context, viewerID int64) error
 }
 
 type Option func(*Service)
@@ -149,6 +150,11 @@ func (s *Service) setFollow(ctx context.Context, userID int64, targetUserID int6
 			return nil, domainrelation.ErrTargetUserNotFound
 		}
 		return nil, ErrUpdateRelationFailed
+	}
+	if s.backfiller != nil {
+		if err := s.backfiller.InvalidateFollowingIndex(ctx, userID); err != nil {
+			return nil, ErrBackfillFollowFeedFailed
+		}
 	}
 	if active && follow.Active() {
 		if err := s.backfillFollowFeed(ctx, userID, targetUserID); err != nil {

@@ -1,4 +1,4 @@
-# Stage 2：Feed Core 重构
+# Stage 2.5：Feed Engine 完善
 
 本阶段把 Feed 从“Service 内部按 scene 分支处理”升级为可扩展的 Feed Engine，同时保持现有 HTTP API、Redis 缓存、Repository 与推荐服务接口兼容。
 
@@ -13,9 +13,9 @@ FeedRouter ── scene → Strategy
     ↓
 Strategy (Timeline / Hot / Following / Recommend)
     ↓
-CandidateSource
+Multi-Source CandidateSource
     ↓
-CandidateFilter → CandidateRanker
+CandidateMerger → CandidateFilter → CandidateRanker → CandidateMixer → Top-N
     ↓
 FeedAssembler
     ↓
@@ -25,10 +25,13 @@ FeedResult
 ## 核心变化
 
 - `FeedRouter`：独立管理 `scene -> Strategy`，支持并发安全注册和读取。
-- `CandidateSource`：把候选获取从 Strategy 中解耦，提供 Timeline、Hot、Following、Recommend 四类来源。
+- `CandidateSource`：把候选获取从 Strategy 中解耦，提供 Timeline、Hot、Following、Recommend 四类来源；多路召回并行执行。
+- `CandidateMerger`：按召回源注册顺序稳定合并候选。
 - `CandidateFilter`：新增候选过滤扩展点，默认启用 `DeduplicateFilter`。
-- `CandidateRanker`：新增排序扩展点，当前使用 `PreserveOrderRanker` 保留各场景既有排序语义。
+- `CandidateRanker`：提供 `PreserveOrderRanker`、`LatestRanker`、`HotRanker` 可插拔实现。
+- `CandidateMixer`：提供按作者轮询的 `AuthorDiversityMixer`，减少同作者内容连续出现。
 - `FeedAssembler`：集中完成 Card、Stat、Viewer Action 的批量水合，Strategy 不再直接关心组装细节。
+- `RecommendStrategy`：首屏合并个性化、热门、最新、关注召回，统一执行合并、去重、排序、打散和 Top-N。
 - 原有 `GET /api/feed-items`、`POST /api/feed-queries` 等接口保持兼容。
 
 ## 后续扩展方式

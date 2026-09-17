@@ -145,6 +145,17 @@ func (r *Repository) ListFollowingPullAuthorIDs(ctx context.Context, viewerID in
 	return authorIDs, err
 }
 
+func (r *Repository) ListFollowingAuthorIDs(ctx context.Context, viewerID int64) ([]int64, error) {
+	var authorIDs []int64
+	err := r.db.WithContext(ctx).
+		Table("user_follow").
+		Select("target_user_id").
+		Where("user_id = ? AND status = ?", viewerID, domainrelation.FollowStatusActive).
+		Order("target_user_id ASC").
+		Scan(&authorIDs).Error
+	return authorIDs, err
+}
+
 func (r *Repository) CountFollowers(ctx context.Context, authorID int64) (int, error) {
 	var count int
 	err := r.db.WithContext(ctx).

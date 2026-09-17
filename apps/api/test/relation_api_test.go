@@ -65,6 +65,7 @@ type memoryFollowFeedBackfiller struct {
 	followerCount int
 	items         []*domainfeed.FeedPageItem
 	writes        []backfillWrite
+	invalidations []int64
 }
 
 type memoryRelationMessageWriter struct {
@@ -286,6 +287,12 @@ func TestRelationFollowBackfillsSmallCreatorInbox(t *testing.T) {
 	}
 	if writes[0].MaxLen != 1000 {
 		t.Fatalf("unexpected inbox max len: %d", writes[0].MaxLen)
+	}
+	if _, err := service.Unfollow(context.Background(), 42, 77, "unfollow-invalidate"); err != nil {
+		t.Fatalf("unfollow: %v", err)
+	}
+	if len(backfiller.invalidations) != 2 || backfiller.invalidations[0] != 42 || backfiller.invalidations[1] != 42 {
+		t.Fatalf("expected follow and unfollow to invalidate index: %+v", backfiller.invalidations)
 	}
 }
 
@@ -513,6 +520,13 @@ func (b *memoryFollowFeedBackfiller) AddInboxItems(ctx context.Context, authorID
 		VideoID:  item.VideoID,
 		MaxLen:   maxLen,
 	})
+	return nil
+}
+
+func (b *memoryFollowFeedBackfiller) InvalidateFollowingIndex(_ context.Context, viewerID int64) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.invalidations = append(b.invalidations, viewerID)
 	return nil
 }
 

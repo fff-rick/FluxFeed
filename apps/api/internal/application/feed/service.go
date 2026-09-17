@@ -31,6 +31,7 @@ type Service struct {
 	repo         domainfeed.Repository
 	router       *FeedRouter
 	defaultScene domainfeed.Scene
+	cache        FeedCache
 }
 
 // Option 用于在装配阶段注册额外 Feed 策略。
@@ -73,7 +74,9 @@ type FeedCache interface {
 }
 
 type FollowingIndexCache interface {
-	ListFollowingIndexPage(ctx context.Context, viewerID int64, authorIDs []int64, cursor *domainfeed.TimelineCursor, limit int) ([]*domainfeed.FeedPageItem, bool, error)
+	ListFollowingIndexPage(ctx context.Context, viewerID int64, authorIDs []int64, pullAuthorIDs []int64, expectInbox bool, cursor *domainfeed.TimelineCursor, limit int) ([]*domainfeed.FeedPageItem, bool, error)
+	GetFollowingSnapshot(ctx context.Context, viewerID int64) (*domainfeed.TimelineCursor, bool, bool, error)
+	BootstrapFollowingIndex(ctx context.Context, viewerID int64, items []*domainfeed.FeedPageItem, complete bool) error
 }
 
 // Strategy 定义单个 Feed 场景的读取策略。
@@ -139,6 +142,7 @@ func WithStrategy(strategy Strategy) Option {
 // WithFeedCache 为 Feed 页、卡片和计数启用读缓存。
 func WithFeedCache(cache FeedCache) Option {
 	return func(s *Service) {
+		s.cache = cache
 		s.router.Range(func(strategy Strategy) {
 			switch typed := strategy.(type) {
 			case *TimelineStrategy:
@@ -161,7 +165,9 @@ func WithFeedCache(cache FeedCache) Option {
 func WithRecommender(recommender Recommender) Option {
 	return func(s *Service) {
 		if recommender != nil {
-			s.RegisterStrategy(NewRecommendStrategy(s.repo, recommender))
+			strategy := NewRecommendStrategy(s.repo, recommender)
+			strategy.cache = s.cache
+			s.RegisterStrategy(strategy)
 		}
 	}
 }
@@ -251,46 +257,7 @@ func (s *TimelineStrategy) List(ctx context.Context, req FeedRequest) (*FeedResu
 		return nil, err
 	}
 
-	items, err := NewFeedAssembler(s.repo, s.cache).Assemble(ctx, req, page.Items)
-	if err != nil {
-		return nil, ErrLoadFeedFailed
-	}
-
-	return &FeedResult{
-		Scene:      s.scene,
-		Items:      items,
-		NextCursor: page.NextCursor,
-		HasMore:    page.HasMore,
-	}, nil
-}
-
-func (s *TimelineStrategy) listPageFromRepo(ctx context.Context, parsedCursor *domainfeed.TimelineCursor, limit int) (*FeedPage, error) {
-	items, err := s.repo.ListTimelinePage(ctx, parsedCursor, limit+1)
-	if err != nil {
-		return nil, ErrLoadFeedFailed
-	}
-
-	// limit+1 是常见分页技巧：多取一条即可判断后面还有没有数据。
-	hasMore := len(items) > limit
-	if hasMore {
-		items = items[:limit]
-	}
-
-	nextCursor := ""
-	if len(items) > 0 {
-		// 下一页从当前页最后一个元素之后开始，游标保存排序所需的两个字段。
-		nextCursor = encodeTimelineCursor(&domainfeed.TimelineCursor{
-			PublishedAt: items[len(items)-1].PublishedAt,
-			VideoID:     items[len(items)-1].VideoID,
-		})
-	}
-
-	return &FeedPage{
-		Scene:      s.scene,
-		Items:      items,
-		NextCursor: nextCursor,
-		HasMore:    hasMore,
-	}, nil
+	return assemblePipelineResult(ctx, req, s.scene, []*FeedPage{page}, NewCandidatePipeline(LatestRanker{}), limit, NewFeedAssembler(s.repo, s.cache))
 }
 
 // NewHotStrategy 创建热榜排序策略。
@@ -316,80 +283,7 @@ func (s *HotStrategy) List(ctx context.Context, req FeedRequest) (*FeedResult, e
 	if err != nil {
 		return nil, err
 	}
-	items, err := NewFeedAssembler(s.repo, s.cache).Assemble(ctx, req, page.Items)
-	if err != nil {
-		return nil, ErrLoadFeedFailed
-	}
-
-	return &FeedResult{
-		Scene:      domainfeed.SceneHot,
-		Items:      items,
-		NextCursor: page.NextCursor,
-		HasMore:    page.HasMore,
-	}, nil
-}
-
-func (s *HotStrategy) listPageFromHotWindow(ctx context.Context, parsedCursor *domainfeed.HotCursor, limit int) (*FeedPage, error) {
-	windowEnd := time.Now().UTC().Truncate(time.Minute)
-	offset := 0
-	if parsedCursor != nil && !parsedCursor.WindowEnd.IsZero() {
-		windowEnd = parsedCursor.WindowEnd.UTC().Truncate(time.Minute)
-		offset = parsedCursor.Offset
-	}
-
-	items, err := s.cache.ListHotWindowPage(ctx, windowEnd, offset, limit+1)
-	if err != nil {
-		return nil, ErrLoadFeedFailed
-	}
-
-	hasMore := len(items) > limit
-	if hasMore {
-		items = items[:limit]
-	}
-
-	nextCursor := ""
-	if len(items) > 0 {
-		nextCursor = encodeHotWindowCursor(&domainfeed.HotCursor{
-			WindowEnd: windowEnd,
-			Offset:    offset + len(items),
-		})
-	}
-
-	return &FeedPage{
-		Scene:      domainfeed.SceneHot,
-		Items:      items,
-		NextCursor: nextCursor,
-		HasMore:    hasMore,
-	}, nil
-}
-
-func (s *HotStrategy) listPageFromRepo(ctx context.Context, parsedCursor *domainfeed.HotCursor, limit int) (*FeedPage, error) {
-	items, err := s.repo.ListHotPage(ctx, parsedCursor, limit+1)
-	if err != nil {
-		return nil, ErrLoadFeedFailed
-	}
-
-	hasMore := len(items) > limit
-	if hasMore {
-		items = items[:limit]
-	}
-
-	nextCursor := ""
-	if len(items) > 0 {
-		last := items[len(items)-1]
-		nextCursor = encodeHotCursor(&domainfeed.HotCursor{
-			HotScore:    last.HotScore,
-			PublishedAt: last.PublishedAt,
-			VideoID:     last.VideoID,
-		})
-	}
-
-	return &FeedPage{
-		Scene:      domainfeed.SceneHot,
-		Items:      items,
-		NextCursor: nextCursor,
-		HasMore:    hasMore,
-	}, nil
+	return assemblePipelineResult(ctx, req, domainfeed.SceneHot, []*FeedPage{page}, NewCandidatePipeline(HotRanker{}), limit, NewFeedAssembler(s.repo, s.cache))
 }
 
 // NewFollowingStrategy 创建关注流推拉混合策略。
@@ -417,61 +311,7 @@ func (s *FollowingStrategy) List(ctx context.Context, req FeedRequest) (*FeedRes
 	if err != nil {
 		return nil, err
 	}
-	items, err := NewFeedAssembler(s.repo, s.cache).Assemble(ctx, req, page.Items)
-	if err != nil {
-		return nil, ErrLoadFeedFailed
-	}
-
-	return &FeedResult{
-		Scene:      domainfeed.SceneFollowing,
-		Items:      items,
-		NextCursor: page.NextCursor,
-		HasMore:    page.HasMore,
-	}, nil
-}
-
-func (s *FollowingStrategy) listPageFromRepo(ctx context.Context, viewerID int64, parsedCursor *domainfeed.TimelineCursor, limit int) (*FeedPage, error) {
-	items, err := s.listFollowingItems(ctx, viewerID, parsedCursor, limit+1)
-	if err != nil {
-		return nil, ErrLoadFeedFailed
-	}
-
-	hasMore := len(items) > limit
-	if hasMore {
-		items = items[:limit]
-	}
-
-	nextCursor := ""
-	if len(items) > 0 {
-		nextCursor = encodeTimelineCursor(&domainfeed.TimelineCursor{
-			PublishedAt: items[len(items)-1].PublishedAt,
-			VideoID:     items[len(items)-1].VideoID,
-		})
-	}
-
-	return &FeedPage{
-		Scene:      domainfeed.SceneFollowing,
-		Items:      items,
-		NextCursor: nextCursor,
-		HasMore:    hasMore,
-	}, nil
-}
-
-func (s *FollowingStrategy) listFollowingItems(ctx context.Context, viewerID int64, parsedCursor *domainfeed.TimelineCursor, limit int) ([]*domainfeed.FeedPageItem, error) {
-	if s.followingIndex != nil {
-		authorIDs, err := s.repo.ListFollowingPullAuthorIDs(ctx, viewerID)
-		if err != nil {
-			return nil, err
-		}
-		items, ok, err := s.followingIndex.ListFollowingIndexPage(ctx, viewerID, authorIDs, parsedCursor, limit)
-		if err != nil {
-			return nil, err
-		}
-		if ok {
-			return items, nil
-		}
-	}
-	return s.repo.ListFollowingPage(ctx, viewerID, parsedCursor, limit)
+	return assemblePipelineResult(ctx, req, domainfeed.SceneFollowing, []*FeedPage{page}, NewCandidatePipeline(LatestRanker{}), limit, NewFeedAssembler(s.repo, s.cache))
 }
 
 // NewRecommendStrategy 创建推荐 Feed 策略。
@@ -487,27 +327,29 @@ func (s *RecommendStrategy) Scene() domainfeed.Scene {
 	return domainfeed.SceneRecommend
 }
 
-// List 读取推荐候选，并按推荐服务给出的顺序组装 Feed 卡片。
+// List 合并个性化、热门、最新和关注召回，再去重、排序、打散并截取 Top-N。
 func (s *RecommendStrategy) List(ctx context.Context, req FeedRequest) (*FeedResult, error) {
 	if req.ViewerID <= 0 {
 		return nil, domainfeed.ErrViewerRequired
 	}
 	limit := normalizeLimit(req.Limit)
-	page, err := NewRecommendCandidateSource(s.recommender).Load(ctx, req, limit)
+	sources := []CandidateSource{
+		NewRecommendCandidateSource(s.recommender),
+		firstPageOnlySource{optionalCandidateSource{NewHotCandidateSource(s.repo, s.cache)}},
+		firstPageOnlySource{optionalCandidateSource{NewTimelineCandidateSource(domainfeed.SceneTimeline, s.repo)}},
+		firstPageOnlySource{optionalCandidateSource{NewFollowingCandidateSource(s.repo, s.followingIndex())}},
+	}
+	pages, err := loadCandidatePages(ctx, req, limit, sources...)
 	if err != nil {
 		return nil, err
 	}
-	pageItems := page.Items
-	items, err := NewFeedAssembler(s.repo, s.cache).Assemble(ctx, req, pageItems)
-	if err != nil {
-		return nil, ErrLoadFeedFailed
-	}
-	return &FeedResult{
-		Scene:      domainfeed.SceneRecommend,
-		Items:      items,
-		NextCursor: page.NextCursor,
-		HasMore:    page.HasMore,
-	}, nil
+	pipeline := NewCandidatePipeline(PreserveOrderRanker{}, AuthorDiversityMixer{})
+	return assemblePipelineResult(ctx, req, domainfeed.SceneRecommend, pages, pipeline, limit, NewFeedAssembler(s.repo, s.cache))
+}
+
+func (s *RecommendStrategy) followingIndex() FollowingIndexCache {
+	index, _ := s.cache.(FollowingIndexCache)
+	return index
 }
 
 // RefreshFeed 从第一页重新加载默认 Feed，适合下拉刷新场景。

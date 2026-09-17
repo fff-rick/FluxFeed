@@ -165,4 +165,4 @@ Feed 压测方案见 [docs/performance-testing.md](docs/performance-testing.md)�
 
 ## License 与来源说明
 
-FluxFeed 基于 FluxFeed 项目进行二次开发。原项目已有的版权、License 与作者归属应继续保留；FluxFeed 的后续改造重点为 Feed Core 架构、高并发分发、缓存、事件驱动、推荐链路与系统治理等工程化升级。
+FluxFeed 基于 GCFeed 项目进行二次开发。原项目已有的版权、License 与作者归属应继续保留；FluxFeed 的后续改造重点为 Feed Core 架构、高并发分发、缓存、事件驱动、推荐链路与系统治理等工程化升级。

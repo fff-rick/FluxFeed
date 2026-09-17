@@ -217,6 +217,7 @@ type FollowFeedBackfiller struct {
 	}
 	feedCache interface {
 		AddInboxItems(ctx context.Context, authorID int64, userIDs []int64, item *domainfeed.FeedPageItem, maxLen int64) error
+		InvalidateFollowingIndex(ctx context.Context, viewerID int64) error
 	}
 }
 
@@ -225,6 +226,7 @@ func NewFollowFeedBackfiller(feedRepo interface {
 	ListAuthorRecentVideos(ctx context.Context, authorID int64, limit int) ([]*domainfeed.FeedPageItem, error)
 }, feedCache interface {
 	AddInboxItems(ctx context.Context, authorID int64, userIDs []int64, item *domainfeed.FeedPageItem, maxLen int64) error
+	InvalidateFollowingIndex(ctx context.Context, viewerID int64) error
 }) *FollowFeedBackfiller {
 	return &FollowFeedBackfiller{feedRepo: feedRepo, feedCache: feedCache}
 }
@@ -239,6 +241,10 @@ func (b *FollowFeedBackfiller) ListAuthorRecentVideos(ctx context.Context, autho
 
 func (b *FollowFeedBackfiller) AddInboxItems(ctx context.Context, authorID int64, userIDs []int64, item *domainfeed.FeedPageItem, maxLen int64) error {
 	return b.feedCache.AddInboxItems(ctx, authorID, userIDs, item, maxLen)
+}
+
+func (b *FollowFeedBackfiller) InvalidateFollowingIndex(ctx context.Context, viewerID int64) error {
+	return b.feedCache.InvalidateFollowingIndex(ctx, viewerID)
 }
 
 // HealthCheck 提供基础健康检查接口，方便本地调试和容器探活。

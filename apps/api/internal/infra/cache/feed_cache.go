@@ -26,6 +26,11 @@ const actionStatJSONTTL = 15 * time.Second
 const actionStatCounterShardCount = 16
 const followingIndexKeyTTL = 30 * 24 * time.Hour
 
+type followingSnapshot struct {
+	Oldest   *domainfeed.TimelineCursor `json:"oldest,omitempty"`
+	Complete bool                       `json:"complete"`
+}
+
 type redisWatchCmdable interface {
 	redis.Cmdable
 	Pipeline() redis.Pipeliner
@@ -246,14 +251,13 @@ func (c *FeedCache) AddInboxItems(ctx context.Context, authorID int64, userIDs [
 		maxLen = 1000
 	}
 	pipe := c.client.Pipeline()
-	score := followingIndexScore(item.PublishedAt, item.VideoID)
 	member := followingIndexMember(item.VideoID, authorID, item.PublishedAt)
 	for _, userID := range userIDs {
 		if userID <= 0 {
 			continue
 		}
 		key := followingInboxKey(userID)
-		pipe.ZAdd(ctx, key, redis.Z{Score: score, Member: member})
+		pipe.ZAdd(ctx, key, redis.Z{Score: 0, Member: member})
 		pipe.ZRemRangeByRank(ctx, key, 0, -maxLen-1)
 		pipe.Expire(ctx, key, followingIndexKeyTTL)
 	}
@@ -269,22 +273,21 @@ func (c *FeedCache) AddAuthorOutboxItem(ctx context.Context, authorID int64, ite
 		maxLen = 500
 	}
 	key := followingAuthorOutboxKey(authorID)
-	score := followingIndexScore(item.PublishedAt, item.VideoID)
 	member := followingIndexMember(item.VideoID, authorID, item.PublishedAt)
 	pipe := c.client.Pipeline()
-	pipe.ZAdd(ctx, key, redis.Z{Score: score, Member: member})
+	pipe.ZAdd(ctx, key, redis.Z{Score: 0, Member: member})
 	pipe.ZRemRangeByRank(ctx, key, 0, -maxLen-1)
 	pipe.Expire(ctx, key, followingIndexKeyTTL)
 	_, err := pipe.Exec(ctx)
 	return err
 }
 
-func (c *FeedCache) ListFollowingIndexPage(ctx context.Context, viewerID int64, authorIDs []int64, cursor *domainfeed.TimelineCursor, limit int) ([]*domainfeed.FeedPageItem, bool, error) {
+func (c *FeedCache) ListFollowingIndexPage(ctx context.Context, viewerID int64, authorIDs []int64, pullAuthorIDs []int64, expectInbox bool, cursor *domainfeed.TimelineCursor, limit int) ([]*domainfeed.FeedPageItem, bool, error) {
 	if viewerID <= 0 || limit <= 0 {
 		return []*domainfeed.FeedPageItem{}, false, nil
 	}
 	keys := []string{followingInboxKey(viewerID)}
-	for _, authorID := range authorIDs {
+	for _, authorID := range pullAuthorIDs {
 		if authorID > 0 {
 			keys = append(keys, followingAuthorOutboxKey(authorID))
 		}
@@ -293,16 +296,15 @@ func (c *FeedCache) ListFollowingIndexPage(ctx context.Context, viewerID int64, 
 	pipe := c.client.Pipeline()
 	cardinalityCommands := make([]*redis.IntCmd, 0, len(keys))
 	rangeCommands := make([]*redis.StringSliceCmd, 0, len(keys))
-	minScore := "-inf"
-	maxScore := "+inf"
+	maxMember := "+"
 	if cursor != nil {
-		maxScore = fmt.Sprintf("(%f", followingIndexScore(cursor.PublishedAt, cursor.VideoID))
+		maxMember = "(" + followingCursorPrefix(cursor)
 	}
 	for _, key := range keys {
 		cardinalityCommands = append(cardinalityCommands, pipe.ZCard(ctx, key))
-		rangeCommands = append(rangeCommands, pipe.ZRevRangeByScore(ctx, key, &redis.ZRangeBy{
-			Min:   minScore,
-			Max:   maxScore,
+		rangeCommands = append(rangeCommands, pipe.ZRevRangeByLex(ctx, key, &redis.ZRangeBy{
+			Min:   "-",
+			Max:   maxMember,
 			Count: int64(limit),
 		}))
 	}
@@ -311,37 +313,48 @@ func (c *FeedCache) ListFollowingIndexPage(ctx context.Context, viewerID int64, 
 	}
 
 	hasIndex := false
-	for _, cmd := range cardinalityCommands {
+	saturated := false
+	saturatedKeys := make([]string, 0)
+	for index, cmd := range cardinalityCommands {
 		count, err := cmd.Result()
 		if err != nil && err != redis.Nil {
 			return nil, false, err
 		}
 		if count > 0 {
 			hasIndex = true
-			break
+		}
+		maxLen := int64(500)
+		if index == 0 {
+			maxLen = 1000
+		}
+		if count >= maxLen {
+			saturated = true
+			saturatedKeys = append(saturatedKeys, keys[index])
 		}
 	}
-	if !hasIndex {
+	if !hasIndex || (expectInbox && cardinalityCommands[0].Val() == 0) {
 		return nil, false, nil
 	}
 
 	seen := map[int64]struct{}{}
+	allowedAuthors := int64Set(authorIDs)
 	items := make([]*domainfeed.FeedPageItem, 0, limit*len(rangeCommands))
-	for commandIndex, cmd := range rangeCommands {
+	truncatedByFilter := false
+	for _, cmd := range rangeCommands {
 		members, err := cmd.Result()
 		if err != nil && err != redis.Nil {
 			return nil, false, err
+		}
+		if len(members) == limit {
+			truncatedByFilter = true
 		}
 		for _, member := range members {
 			item, ok := feedPageItemFromFollowingMember(member)
 			if !ok {
 				continue
 			}
-			if commandIndex > 0 && item.AuthorID > 0 {
-				allowedAuthors := int64Set(authorIDs)
-				if _, followed := allowedAuthors[item.AuthorID]; !followed {
-					continue
-				}
+			if _, followed := allowedAuthors[item.AuthorID]; !followed {
+				continue
 			}
 			if _, exists := seen[item.VideoID]; exists {
 				continue
@@ -351,10 +364,77 @@ func (c *FeedCache) ListFollowingIndexPage(ctx context.Context, viewerID int64, 
 		}
 	}
 	sortFeedPageItemsByTimeline(items)
+	if len(items) < limit && (saturated || truncatedByFilter) {
+		return nil, false, nil
+	}
+	if len(items) >= limit {
+		last := items[limit-1]
+		for _, key := range saturatedKeys {
+			members, err := c.client.ZRange(ctx, key, 0, 0).Result()
+			if err != nil || len(members) == 0 {
+				return nil, false, err
+			}
+			oldest, ok := feedPageItemFromFollowingMember(members[0])
+			if !ok || followingPageTouchesBoundary(last, oldest) {
+				return nil, false, nil
+			}
+		}
+	}
 	if len(items) > limit {
 		items = items[:limit]
 	}
 	return items, true, nil
+}
+
+func followingPageTouchesBoundary(last *domainfeed.FeedPageItem, oldest *domainfeed.FeedPageItem) bool {
+	return last.PublishedAt.Before(oldest.PublishedAt) ||
+		(last.PublishedAt.Equal(oldest.PublishedAt) && last.VideoID <= oldest.VideoID)
+}
+
+func (c *FeedCache) GetFollowingSnapshot(ctx context.Context, viewerID int64) (*domainfeed.TimelineCursor, bool, bool, error) {
+	content, err := c.client.Get(ctx, followingSnapshotKey(viewerID)).Bytes()
+	if err == redis.Nil {
+		return nil, false, false, nil
+	}
+	if err != nil {
+		return nil, false, false, err
+	}
+	var snapshot followingSnapshot
+	if err := json.Unmarshal(content, &snapshot); err != nil {
+		return nil, false, false, err
+	}
+	return snapshot.Oldest, snapshot.Complete, true, nil
+}
+
+func (c *FeedCache) BootstrapFollowingIndex(ctx context.Context, viewerID int64, items []*domainfeed.FeedPageItem, complete bool) error {
+	if viewerID <= 0 {
+		return nil
+	}
+	snapshot := followingSnapshot{Complete: complete}
+	if len(items) > 0 {
+		last := items[len(items)-1]
+		snapshot.Oldest = &domainfeed.TimelineCursor{PublishedAt: last.PublishedAt, VideoID: last.VideoID}
+	}
+	content, err := json.Marshal(snapshot)
+	if err != nil {
+		return err
+	}
+	pipe := c.client.Pipeline()
+	key := followingInboxKey(viewerID)
+	for _, item := range items {
+		if item != nil && item.VideoID > 0 && item.AuthorID > 0 && !item.PublishedAt.IsZero() {
+			pipe.ZAdd(ctx, key, redis.Z{Score: 0, Member: followingIndexMember(item.VideoID, item.AuthorID, item.PublishedAt)})
+		}
+	}
+	pipe.ZRemRangeByRank(ctx, key, 0, -1001)
+	pipe.Expire(ctx, key, followingIndexKeyTTL)
+	pipe.Set(ctx, followingSnapshotKey(viewerID), content, followingIndexKeyTTL)
+	_, err = pipe.Exec(ctx)
+	return err
+}
+
+func (c *FeedCache) InvalidateFollowingIndex(ctx context.Context, viewerID int64) error {
+	return c.client.Del(ctx, followingInboxKey(viewerID), followingSnapshotKey(viewerID)).Err()
 }
 
 // AddHotScore 把一次互动热度写入 1 分钟粒度的热榜桶。
@@ -710,44 +790,47 @@ func feedStatKey(videoID int64) string {
 }
 
 func followingInboxKey(userID int64) string {
-	return fmt.Sprintf("feed:following:inbox:v1:%d", userID)
+	return fmt.Sprintf("feed:following:inbox:v2:%d", userID)
 }
 
 func followingAuthorOutboxKey(authorID int64) string {
-	return fmt.Sprintf("feed:following:author:v1:%d", authorID)
+	return fmt.Sprintf("feed:following:author:v2:%d", authorID)
 }
 
-func followingIndexScore(publishedAt time.Time, videoID int64) float64 {
-	return float64(publishedAt.UTC().Unix()*1000000 + videoID%1000000)
+func followingSnapshotKey(userID int64) string {
+	return fmt.Sprintf("feed:following:snapshot:v2:%d", userID)
 }
 
 func followingIndexMember(videoID int64, authorID int64, publishedAt time.Time) string {
-	return fmt.Sprintf("%d:%d:%s", videoID, authorID, publishedAt.UTC().Format(time.RFC3339Nano))
+	// All v2 ZSET scores are zero; fixed-width members give exact timeline order without float collisions.
+	return fmt.Sprintf("%019d:%020d:%020d", publishedAt.UTC().UnixNano(), videoID, authorID)
+}
+
+func followingCursorPrefix(cursor *domainfeed.TimelineCursor) string {
+	return fmt.Sprintf("%019d:%020d", cursor.PublishedAt.UTC().UnixNano(), cursor.VideoID)
 }
 
 func feedPageItemFromFollowingMember(member string) (*domainfeed.FeedPageItem, bool) {
-	parts := strings.SplitN(member, ":", 3)
-	if len(parts) != 2 && len(parts) != 3 {
+	parts := strings.Split(member, ":")
+	if len(parts) != 3 {
 		return nil, false
 	}
-	videoID, err := strconv.ParseInt(parts[0], 10, 64)
+	publishedNanos, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || publishedNanos <= 0 {
+		return nil, false
+	}
+	videoID, err := strconv.ParseInt(parts[1], 10, 64)
 	if err != nil || videoID <= 0 {
 		return nil, false
 	}
-	authorID := int64(0)
-	publishedAtIndex := 1
-	if len(parts) == 3 {
-		authorID, _ = strconv.ParseInt(parts[1], 10, 64)
-		publishedAtIndex = 2
-	}
-	publishedAt, err := time.Parse(time.RFC3339Nano, parts[publishedAtIndex])
-	if err != nil || publishedAt.IsZero() {
+	authorID, err := strconv.ParseInt(parts[2], 10, 64)
+	if err != nil || authorID <= 0 {
 		return nil, false
 	}
 	return &domainfeed.FeedPageItem{
 		VideoID:     videoID,
 		AuthorID:    authorID,
-		PublishedAt: publishedAt,
+		PublishedAt: time.Unix(0, publishedNanos).UTC(),
 	}, true
 }
 
