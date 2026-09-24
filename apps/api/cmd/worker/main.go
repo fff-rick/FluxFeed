@@ -8,7 +8,9 @@ import (
 	"syscall"
 
 	applicationembedding "FluxFeed/internal/application/embedding"
+	applicationexposure "FluxFeed/internal/application/exposure"
 	applicationinteraction "FluxFeed/internal/application/interaction"
+	applicationrecommendation "FluxFeed/internal/application/recommendation"
 	applicationvideo "FluxFeed/internal/application/video"
 	infracache "FluxFeed/internal/infra/cache"
 	infraconfig "FluxFeed/internal/infra/config"
@@ -19,6 +21,7 @@ import (
 	infrafeed "FluxFeed/internal/infra/persistence/feed"
 	infrainteraction "FluxFeed/internal/infra/persistence/interaction"
 	migration "FluxFeed/internal/infra/persistence/migration"
+	infrarecommendation "FluxFeed/internal/infra/persistence/recommendation"
 
 	gormmysql "gorm.io/driver/mysql"
 	"gorm.io/gorm"
@@ -30,9 +33,6 @@ func main() {
 	cfg, err := infraconfig.LoadConfig(configPath)
 	if err != nil {
 		log.Fatalf("load config failed: %v", err)
-	}
-	if cfg.RabbitMQ.URL == "" {
-		log.Fatal("rabbitmq url is required for worker")
 	}
 	if cfg.Redis.Addr == "" {
 		log.Fatal("redis addr is required for worker")
@@ -52,11 +52,11 @@ func main() {
 		log.Fatalf("auto migrate failed: %v", err)
 	}
 
-	rabbitMQ, err := inframq.NewRabbitMQ(cfg.RabbitMQ)
+	eventBus, err := newWorkerEventBus(cfg)
 	if err != nil {
-		log.Fatalf("init rabbitmq failed: %v", err)
+		log.Fatalf("init event bus failed: %v", err)
 	}
-	defer closeRabbitMQ(rabbitMQ)
+	defer eventBus.Close()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -66,7 +66,7 @@ func main() {
 		}
 	}()
 
-	if err := startWorkers(ctx, cfg, gormDB, rabbitMQ); err != nil {
+	if err := startWorkers(ctx, cfg, gormDB, eventBus); err != nil {
 		log.Fatalf("start workers failed: %v", err)
 	}
 	log.Println("gcfeed worker is running")
@@ -74,37 +74,68 @@ func main() {
 	log.Println("gcfeed worker stopped")
 }
 
-func startWorkers(ctx context.Context, cfg *infraconfig.Config, gormDB *gorm.DB, rabbitMQ *inframq.RabbitMQ) error {
+type workerEventBus interface {
+	applicationinteraction.ActionEventConsumer
+	applicationvideo.PublishedEventConsumer
+	ConsumeVideoPublishedForEmbedding(ctx context.Context, handler func(context.Context, *applicationvideo.PublishedEvent) error) error
+	ConsumeViewEventRecorded(ctx context.Context, handler func(context.Context, *applicationexposure.ViewEventRecordedEvent) error) error
+	Close() error
+}
+
+type recommendationEventConsumer interface {
+	ConsumeViewEventRecordedForRecommendation(ctx context.Context, handler func(context.Context, *applicationexposure.ViewEventRecordedEvent) error) error
+}
+
+func newWorkerEventBus(cfg *infraconfig.Config) (workerEventBus, error) {
+	if len(cfg.Kafka.Brokers) > 0 {
+		kafka, err := inframq.NewKafka(cfg.Kafka)
+		if err == nil {
+			log.Printf("event bus enabled: kafka")
+			return inframq.NewFeedEventBus(kafka, cfg.Kafka), nil
+		}
+		log.Printf("kafka unavailable, falling back to rabbitmq: %v", err)
+	}
+	return inframq.NewRabbitMQ(cfg.RabbitMQ)
+}
+
+func startWorkers(ctx context.Context, cfg *infraconfig.Config, gormDB *gorm.DB, eventBus workerEventBus) error {
 	redisClient := infracache.NewRedisClient(cfg.Redis)
 	feedCache := infracache.NewFeedCache(redisClient)
 
 	interactionRepo := infrainteraction.New(gormDB)
-	actionWorker := applicationinteraction.NewActionWorker(interactionRepo, rabbitMQ)
+	actionWorker := applicationinteraction.NewActionWorker(interactionRepo, eventBus)
 	if err := actionWorker.Start(ctx); err != nil {
 		return err
 	}
 
 	feedRepo := infrafeed.New(gormDB)
 	feedPreheater := applicationvideo.NewFeedPreheater(feedRepo, feedCache)
-	fanoutWorker := applicationvideo.NewFanoutWorker(feedRepo, rabbitMQ, feedCache, feedPreheater)
+	fanoutWorker := applicationvideo.NewFanoutWorker(feedRepo, eventBus, feedCache, feedPreheater)
 	if err := fanoutWorker.Start(ctx); err != nil {
 		return err
 	}
 
 	embeddingRepo := infraembedding.New(gormDB)
 	embeddingService := applicationembedding.New(embeddingRepo, nil)
-	embeddingWorker := applicationembedding.NewVideoEmbeddingWorker(embeddingService, rabbitMQ)
-	return embeddingWorker.Start(ctx)
+	embeddingWorker := applicationembedding.NewVideoEmbeddingWorker(embeddingService, eventBus)
+	if err := embeddingWorker.Start(ctx); err != nil {
+		return err
+	}
+
+	recommendationRepo := infrarecommendation.New(gormDB)
+	featureWorker := applicationembedding.NewUserFeatureWorker(recommendationRepo, eventBus)
+	if err := featureWorker.Start(ctx); err != nil {
+		return err
+	}
+
+	if consumer, ok := eventBus.(recommendationEventConsumer); ok {
+		return applicationrecommendation.NewEventWorker(feedCache, consumer).Start(ctx)
+	}
+	return nil
 }
 
 func closeSQL(db *sql.DB) {
 	if db != nil {
 		_ = db.Close()
-	}
-}
-
-func closeRabbitMQ(rabbitMQ *inframq.RabbitMQ) {
-	if rabbitMQ != nil {
-		_ = rabbitMQ.Close()
 	}
 }

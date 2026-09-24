@@ -7,7 +7,23 @@ type Config struct {
 	Internal InternalConfig `yaml:"internal"`
 	Database DatabaseConfig `yaml:"database"`
 	Redis    RedisConfig    `yaml:"redis"`
+	Kafka    KafkaConfig    `yaml:"kafka"`
 	RabbitMQ RabbitMQConfig `yaml:"rabbitmq"`
+}
+
+// KafkaConfig 保存统一事件总线的 Broker、Topic 和消费组配置。
+type KafkaConfig struct {
+	Brokers             []string `yaml:"brokers"`
+	ClientID            string   `yaml:"client_id"`
+	VideoTopic          string   `yaml:"video_topic"`
+	InteractionTopic    string   `yaml:"interaction_topic"`
+	ExposureTopic       string   `yaml:"exposure_topic"`
+	RelationTopic       string   `yaml:"relation_topic"`
+	FanoutGroup         string   `yaml:"fanout_group"`
+	EmbeddingGroup      string   `yaml:"embedding_group"`
+	CounterGroup        string   `yaml:"counter_group"`
+	FeatureGroup        string   `yaml:"feature_group"`
+	RecommendationGroup string   `yaml:"recommendation_group"`
 }
 
 // JWTConfig 保存 JWT 签名密钥和访问 token 有效期。

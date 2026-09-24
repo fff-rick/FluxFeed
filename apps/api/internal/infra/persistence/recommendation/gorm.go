@@ -81,6 +81,41 @@ func (r *Repository) ListCandidatePool(ctx context.Context, userID int64, limit 
 }
 
 func (r *Repository) LoadUserInterestVector(ctx context.Context, userID int64) ([]float64, bool, error) {
+	var materialized UserInterestModel
+	err := r.db.WithContext(ctx).
+		Where("user_id = ? AND model = ?", userID, domainembedding.HashNgramModel).
+		Take(&materialized).Error
+	if err == nil {
+		vector, decodeErr := decodeVector(materialized.EmbeddingJSON)
+		return vector, len(vector) > 0, decodeErr
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, false, err
+	}
+	return r.calculateUserInterestVector(ctx, userID)
+}
+
+// RefreshUserInterestVector 从权威观看流水重算用户向量，重复消费同一事件结果不变。
+func (r *Repository) RefreshUserInterestVector(ctx context.Context, userID int64) error {
+	vector, ok, err := r.calculateUserInterestVector(ctx, userID)
+	if err != nil || !ok {
+		return err
+	}
+	content, err := json.Marshal(vector)
+	if err != nil {
+		return err
+	}
+	model := UserInterestModel{
+		UserID: userID, Model: domainembedding.HashNgramModel,
+		Dimension: len(vector), EmbeddingJSON: string(content),
+	}
+	return r.db.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "user_id"}, {Name: "model"}},
+		DoUpdates: clause.AssignmentColumns([]string{"dimension", "embedding_json", "updated_at"}),
+	}).Create(&model).Error
+}
+
+func (r *Repository) calculateUserInterestVector(ctx context.Context, userID int64) ([]float64, bool, error) {
 	rows, err := r.db.WithContext(ctx).
 		Table("video_view_events AS ev").
 		Select("ve.embedding_json, ev.event_type, ev.watch_ms, ev.completed").

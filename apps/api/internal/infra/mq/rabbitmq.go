@@ -4,6 +4,7 @@ import (
 	applicationexposure "FluxFeed/internal/application/exposure"
 	applicationinteraction "FluxFeed/internal/application/interaction"
 	applicationvideo "FluxFeed/internal/application/video"
+	domainexposure "FluxFeed/internal/domain/exposure"
 	infraconfig "FluxFeed/internal/infra/config"
 	inframetrics "FluxFeed/internal/infra/metrics"
 	"context"
@@ -94,7 +95,7 @@ func (r *RabbitMQ) PublishActionChanged(ctx context.Context, event *applicationi
 	if err != nil {
 		return err
 	}
-	return r.publishChannel.PublishWithContext(
+	err = r.publishChannel.PublishWithContext(
 		ctx,
 		r.config.InteractionExchange,
 		r.config.ActionChangedRouting,
@@ -108,6 +109,8 @@ func (r *RabbitMQ) PublishActionChanged(ctx context.Context, event *applicationi
 			Body:         content,
 		},
 	)
+	inframetrics.ObserveEventBus("rabbitmq", actionEventType(event), "publish", err)
+	return err
 }
 
 func (r *RabbitMQ) PublishVideoPublished(ctx context.Context, event *applicationvideo.PublishedEvent) error {
@@ -118,7 +121,7 @@ func (r *RabbitMQ) PublishVideoPublished(ctx context.Context, event *application
 	if err != nil {
 		return err
 	}
-	return r.publishChannel.PublishWithContext(
+	err = r.publishChannel.PublishWithContext(
 		ctx,
 		r.config.VideoExchange,
 		r.config.VideoPublishedRouting,
@@ -132,6 +135,8 @@ func (r *RabbitMQ) PublishVideoPublished(ctx context.Context, event *application
 			Body:         content,
 		},
 	)
+	inframetrics.ObserveEventBus("rabbitmq", "VideoPublished", "publish", err)
+	return err
 }
 
 func (r *RabbitMQ) PublishViewEventRecorded(ctx context.Context, event *applicationexposure.ViewEventRecordedEvent) error {
@@ -142,7 +147,7 @@ func (r *RabbitMQ) PublishViewEventRecorded(ctx context.Context, event *applicat
 	if err != nil {
 		return err
 	}
-	return r.publishChannel.PublishWithContext(
+	err = r.publishChannel.PublishWithContext(
 		ctx,
 		r.config.ExposureExchange,
 		r.config.ViewEventRecordedRouting,
@@ -156,6 +161,12 @@ func (r *RabbitMQ) PublishViewEventRecorded(ctx context.Context, event *applicat
 			Body:         content,
 		},
 	)
+	eventType := "VideoViewed"
+	if event.EventType == domainexposure.EventTypeExposed {
+		eventType = "VideoExposed"
+	}
+	inframetrics.ObserveEventBus("rabbitmq", eventType, "publish", err)
+	return err
 }
 
 func (r *RabbitMQ) ConsumeActionChanged(ctx context.Context, handler func(context.Context, *applicationinteraction.ActionChangedEvent) error) error {

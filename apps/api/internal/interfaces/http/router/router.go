@@ -81,7 +81,6 @@ func Register(g *gin.Engine, cfg *infraconfig.Config, db *sql.DB) error {
 	interactionOptions := []applicationinteraction.Option{}
 	exposureOptions := []applicationexposure.Option{}
 	var feedCache *infracache.FeedCache
-	var rabbitMQ *inframq.RabbitMQ
 	if cfg.Redis.Addr != "" {
 		redisClient := infracache.NewRedisClient(cfg.Redis)
 		feedCache = infracache.NewFeedCache(redisClient)
@@ -99,21 +98,23 @@ func Register(g *gin.Engine, cfg *infraconfig.Config, db *sql.DB) error {
 	playbackRepo := infraplayback.New(gormDB)
 	playbackService := applicationplayback.New(playbackRepo)
 	playbackHandler := interfaceshttpplayback.New(playbackService)
-	if cfg.RabbitMQ.URL != "" {
-		rabbitMQ, err = inframq.NewRabbitMQ(cfg.RabbitMQ)
-		if err != nil {
-			log.Printf("rabbitmq disabled: %v", err)
-		} else {
-			videoOptions = append(videoOptions, applicationvideo.WithPublishedEventPublisher(rabbitMQ))
-			exposureOptions = append(exposureOptions, applicationexposure.WithViewEventPublisher(rabbitMQ))
-			if feedCache != nil {
-				interactionOptions = append(interactionOptions, applicationinteraction.WithAsyncActionPipeline(feedCache, rabbitMQ))
-			}
+	eventPublisher := newApplicationEventPublisher(cfg)
+	if eventPublisher != nil {
+		videoOptions = append(videoOptions, applicationvideo.WithPublishedEventPublisher(eventPublisher))
+		exposureOptions = append(exposureOptions, applicationexposure.WithViewEventPublisher(eventPublisher))
+		if feedCache != nil {
+			interactionOptions = append(interactionOptions, applicationinteraction.WithAsyncActionPipeline(feedCache, eventPublisher))
+		}
+		if publisher, ok := eventPublisher.(applicationinteraction.CommentEventPublisher); ok {
+			interactionOptions = append(interactionOptions, applicationinteraction.WithCommentEventPublisher(publisher))
 		}
 	}
 	messageWriter := NewMessageWriter(messageService)
 	interactionOptions = append(interactionOptions, applicationinteraction.WithMessageWriter(messageWriter))
 	relationOptions := []applicationrelation.Option{applicationrelation.WithMessageWriter(messageWriter)}
+	if publisher, ok := eventPublisher.(applicationrelation.FollowEventPublisher); ok {
+		relationOptions = append(relationOptions, applicationrelation.WithFollowEventPublisher(publisher))
+	}
 	videoService := applicationvideo.New(videoRepo, videoOptions...)
 	videoHandler := interfaceshttpvideo.New(videoService)
 	interactionService := applicationinteraction.New(interactionRepo, interactionOptions...)
@@ -193,6 +194,33 @@ func Register(g *gin.Engine, cfg *infraconfig.Config, db *sql.DB) error {
 	internal.POST("/playback-qos-reports", interfaceshttpmiddleware.NewInternalTokenAuth(cfg.Internal.Token), playbackHandler.CreateInternalQoSReport)
 
 	return nil
+}
+
+type applicationEventPublisher interface {
+	applicationvideo.PublishedEventPublisher
+	applicationinteraction.ActionEventPublisher
+	applicationexposure.ViewEventPublisher
+}
+
+func newApplicationEventPublisher(cfg *infraconfig.Config) applicationEventPublisher {
+	if len(cfg.Kafka.Brokers) > 0 {
+		kafka, err := inframq.NewKafka(cfg.Kafka)
+		if err == nil {
+			log.Printf("event bus enabled: kafka")
+			return inframq.NewFeedEventBus(kafka, cfg.Kafka)
+		}
+		log.Printf("kafka unavailable, falling back to rabbitmq: %v", err)
+	}
+	if cfg.RabbitMQ.URL == "" {
+		return nil
+	}
+	rabbitMQ, err := inframq.NewRabbitMQ(cfg.RabbitMQ)
+	if err != nil {
+		log.Printf("rabbitmq disabled: %v", err)
+		return nil
+	}
+	log.Printf("event bus enabled: rabbitmq")
+	return rabbitMQ
 }
 
 type MessageWriter struct {
