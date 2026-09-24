@@ -11,6 +11,7 @@ var ErrSaveExposureFailed = errors.New("failed to save exposure")
 type Service struct {
 	repo      domainexposure.Repository
 	publisher ViewEventPublisher
+	seen      SeenRecorder
 }
 
 type RecordViewEventResult struct {
@@ -21,6 +22,10 @@ type RecordViewEventResult struct {
 // ViewEventPublisher 投递观看行为事件，推荐画像 worker 基于该事件更新用户向量。
 type ViewEventPublisher interface {
 	PublishViewEventRecorded(ctx context.Context, event *ViewEventRecordedEvent) error
+}
+
+type SeenRecorder interface {
+	MarkSeen(ctx context.Context, userID int64, videoID int64) error
 }
 
 type Option func(*Service)
@@ -40,6 +45,12 @@ func WithViewEventPublisher(publisher ViewEventPublisher) Option {
 	}
 }
 
+func WithSeenRecorder(recorder SeenRecorder) Option {
+	return func(s *Service) {
+		s.seen = recorder
+	}
+}
+
 // RecordViewEvent 写入观看行为，并在 exposed 事件时同步维护曝光聚合索引。
 func (s *Service) RecordViewEvent(ctx context.Context, userID int64, videoID int64, scene string, requestID string, eventType string, watchMs int, completed bool) (*RecordViewEventResult, error) {
 	event, err := domainexposure.NewViewEvent(userID, videoID, scene, requestID, eventType, watchMs, completed)
@@ -55,6 +66,9 @@ func (s *Service) RecordViewEvent(ctx context.Context, userID int64, videoID int
 		return nil, ErrSaveExposureFailed
 	}
 	s.publishViewEventRecorded(ctx, savedEvent, exposure)
+	if exposure != nil && s.seen != nil {
+		_ = s.seen.MarkSeen(ctx, savedEvent.UserID, savedEvent.VideoID)
+	}
 
 	return &RecordViewEventResult{
 		Event:    savedEvent,

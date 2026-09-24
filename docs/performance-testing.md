@@ -229,6 +229,43 @@ VUS=200
 
 当 P95 明显升高、失败率上升或 CPU/数据库压力明显升高时，就接近当前本地环境上限。
 
+## Stage 4 缓存专项压测
+
+仓库内置热点 Key 与分散 Key 混合场景：
+
+```bash
+cd /home/xin/work/FluxFeed
+k6 run scripts/feed-cache-load.js
+```
+
+可调参数：
+
+```bash
+BASE_URL=http://127.0.0.1:8080 \
+SCENE=timeline HOT_VUS=80 SPREAD_VUS=20 DURATION=2m \
+k6 run scripts/feed-cache-load.js
+```
+
+默认验收基线：请求错误率低于 1%，业务成功率高于 99%，热点首屏 P95 低于
+100ms，分散 Key P95 低于 300ms。压测同时观察：
+
+```promql
+sum(rate(gcfeed_feed_cache_requests_total{result="hit"}[5m])) by (area)
+/
+clamp_min(sum(rate(gcfeed_feed_cache_requests_total{result=~"hit|miss"}[5m])) by (area), 0.001)
+```
+
+`page_l1`、`card_l1`、`stat_l1` 应在预热后出现稳定命中；`page_stale` 表示
+Timeline 软过期页正在通过 stale-while-revalidate 服务。若热点首屏不达标，先看
+Redis/数据库回源比例，再调整 L1 容量和 TTL，不以盲目增加并发掩盖瓶颈。
+
+本地算法基准无需外部服务：
+
+```bash
+cd apps/api
+go test -run '^$' -bench 'Benchmark(LocalCache|Seen)' -benchmem ./internal/infra/cache
+```
+
 ## 如何解读结果
 
 示例：

@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"sort"
 	"strconv"
 	"strings"
@@ -25,6 +26,19 @@ const actionStatTTL = 24 * time.Hour
 const actionStatJSONTTL = 15 * time.Second
 const actionStatCounterShardCount = 16
 const followingIndexKeyTTL = 30 * 24 * time.Hour
+const localCacheMaxEntries = 10_000
+const localPageCacheTTL = 2 * time.Second
+const localCardCacheTTL = 30 * time.Second
+const localStatCacheTTL = 2 * time.Second
+const missingCardCacheTTL = 30 * time.Second
+const followingRelationCacheTTL = 10 * time.Minute
+const seenCacheTTL = 30 * 24 * time.Hour
+
+// ponytail: 每用户固定 32 KiB；曝光规模显著超过 2 万/月时再按月分片或扩大 Bitmap。
+const seenBloomBits = uint64(1 << 18)
+const seenBloomHashes = 3
+
+var missingCardValue = []byte("-")
 
 type followingSnapshot struct {
 	Oldest   *domainfeed.TimelineCursor `json:"oldest,omitempty"`
@@ -55,32 +69,54 @@ type redisStatCacheClient interface {
 // FeedCache 使用 Redis 保存 Feed 查询结果。
 type FeedCache struct {
 	client redisWatchCmdable
+	local  *localCache
 }
 
 // NewFeedCache 创建 Feed 结果缓存。
 func NewFeedCache(client redisWatchCmdable) *FeedCache {
-	return &FeedCache{client: client}
+	return &FeedCache{client: client, local: newLocalCache(localCacheMaxEntries)}
 }
 
 // GetPage 读取缓存中的轻量 Feed 页。
 func (c *FeedCache) GetPage(ctx context.Context, key string) (*applicationfeed.FeedPage, bool, error) {
+	page, ok, _, err := c.GetPageState(ctx, key)
+	return page, ok, err
+}
+
+// GetPageState 在软过期窗口返回 stale=true，供应用层后台刷新并继续服务旧值。
+func (c *FeedCache) GetPageState(ctx context.Context, key string) (*applicationfeed.FeedPage, bool, bool, error) {
+	if content, ok := c.local.get(key); ok {
+		var page applicationfeed.FeedPage
+		if json.Unmarshal(content, &page) == nil {
+			inframetrics.ObserveCacheRead("page_l1", 1, 1, nil)
+			return &page, true, false, nil
+		}
+	}
+	if content, ok := c.local.getStale(key); ok {
+		var page applicationfeed.FeedPage
+		if json.Unmarshal(content, &page) == nil {
+			inframetrics.ObserveCacheRead("page_stale", 1, 1, nil)
+			return &page, true, true, nil
+		}
+	}
 	content, err := c.client.Get(ctx, key).Bytes()
 	if err == redis.Nil {
 		inframetrics.ObserveCacheRead("page", 1, 0, nil)
-		return nil, false, nil
+		return nil, false, false, nil
 	}
 	if err != nil {
 		inframetrics.ObserveCacheRead("page", 1, 0, err)
-		return nil, false, err
+		return nil, false, false, err
 	}
 
 	var page applicationfeed.FeedPage
 	if err := json.Unmarshal(content, &page); err != nil {
 		inframetrics.ObserveCacheRead("page", 1, 0, err)
-		return nil, false, err
+		return nil, false, false, err
 	}
+	c.local.set(key, content, localPageCacheTTL)
 	inframetrics.ObserveCacheRead("page", 1, 1, nil)
-	return &page, true, nil
+	return &page, true, false, nil
 }
 
 // SetPage 写入轻量 Feed 页，并设置过期时间。
@@ -91,6 +127,8 @@ func (c *FeedCache) SetPage(ctx context.Context, key string, page *applicationfe
 		return err
 	}
 	err = c.client.Set(ctx, key, content, ttl).Err()
+	// L2 短暂不可用时仍保留本进程的短期结果，避免请求直接打到 MySQL。
+	c.local.setStale(key, content, ttl, ttl*2)
 	inframetrics.ObserveCacheWrite("page", 1, err)
 	return err
 }
@@ -102,9 +140,33 @@ func (c *FeedCache) GetCards(ctx context.Context, videoIDs []int64) (map[int64]*
 		return cards, nil
 	}
 
-	values, err := c.client.MGet(ctx, cacheKeys(videoIDs, feedCardKey)...).Result()
+	misses := make([]int64, 0, len(videoIDs))
+	for _, videoID := range videoIDs {
+		content, ok := c.local.get(feedCardKey(videoID))
+		if !ok {
+			misses = append(misses, videoID)
+			continue
+		}
+		if string(content) == string(missingCardValue) {
+			cards[videoID] = nil
+			continue
+		}
+		var card domainfeed.FeedCard
+		if json.Unmarshal(content, &card) == nil {
+			cards[videoID] = &card
+		}
+	}
+	if len(misses) == 0 {
+		inframetrics.ObserveCacheRead("card_l1", len(videoIDs), len(cards), nil)
+		return cards, nil
+	}
+
+	values, err := c.client.MGet(ctx, cacheKeys(misses, feedCardKey)...).Result()
 	if err != nil {
-		inframetrics.ObserveCacheRead("card", len(videoIDs), 0, err)
+		inframetrics.ObserveCacheRead("card", len(misses), 0, err)
+		if len(cards) > 0 {
+			return cards, nil
+		}
 		return nil, err
 	}
 	for index, value := range values {
@@ -112,12 +174,18 @@ func (c *FeedCache) GetCards(ctx context.Context, videoIDs []int64) (map[int64]*
 		if !ok {
 			continue
 		}
+		videoID := misses[index]
+		c.local.set(feedCardKey(videoID), content, localCardCacheTTL)
+		if string(content) == string(missingCardValue) {
+			cards[videoID] = nil
+			continue
+		}
 		var card domainfeed.FeedCard
 		if err := json.Unmarshal(content, &card); err != nil {
 			continue
 		}
 		if card.VideoID <= 0 {
-			card.VideoID = videoIDs[index]
+			card.VideoID = videoID
 		}
 		cards[card.VideoID] = &card
 	}
@@ -131,14 +199,26 @@ func (c *FeedCache) SetCards(ctx context.Context, cards map[int64]*domainfeed.Fe
 	queued := false
 
 	for _, card := range cards {
-		if card == nil || card.VideoID <= 0 {
+		if card == nil {
 			continue
 		}
 		content, err := json.Marshal(card)
 		if err != nil {
 			return err
 		}
-		pipe.Set(ctx, feedCardKey(card.VideoID), content, ttl)
+		key := feedCardKey(card.VideoID)
+		entryTTL := jitterTTL(key, ttl)
+		pipe.Set(ctx, key, content, entryTTL)
+		c.local.set(key, content, minTTL(entryTTL, localCardCacheTTL))
+		queued = true
+	}
+	for videoID, card := range cards {
+		if card != nil || videoID <= 0 {
+			continue
+		}
+		key := feedCardKey(videoID)
+		pipe.Set(ctx, key, missingCardValue, jitterTTL(key, missingCardCacheTTL))
+		c.local.set(key, missingCardValue, missingCardCacheTTL)
 		queued = true
 	}
 	if !queued {
@@ -151,7 +231,39 @@ func (c *FeedCache) SetCards(ctx context.Context, cards map[int64]*domainfeed.Fe
 
 // GetStats 批量读取视频计数缓存。
 func (c *FeedCache) GetStats(ctx context.Context, videoIDs []int64) (map[int64]*domainfeed.FeedStat, error) {
-	return getStats(ctx, c.client, videoIDs)
+	stats := make(map[int64]*domainfeed.FeedStat, len(videoIDs))
+	misses := make([]int64, 0, len(videoIDs))
+	for _, videoID := range videoIDs {
+		content, ok := c.local.get(feedStatKey(videoID))
+		if !ok {
+			misses = append(misses, videoID)
+			continue
+		}
+		var stat domainfeed.FeedStat
+		if json.Unmarshal(content, &stat) != nil {
+			misses = append(misses, videoID)
+			continue
+		}
+		stats[videoID] = &stat
+	}
+	if len(misses) == 0 {
+		inframetrics.ObserveCacheRead("stat_l1", len(videoIDs), len(stats), nil)
+		return stats, nil
+	}
+	loaded, err := getStats(ctx, c.client, misses)
+	if err != nil {
+		if len(stats) > 0 {
+			return stats, nil
+		}
+		return nil, err
+	}
+	for videoID, stat := range loaded {
+		stats[videoID] = stat
+		if content, err := json.Marshal(stat); err == nil {
+			c.local.set(feedStatKey(videoID), content, localStatCacheTTL)
+		}
+	}
+	return stats, nil
 }
 
 func getStats(ctx context.Context, client redisStatCacheClient, videoIDs []int64) (map[int64]*domainfeed.FeedStat, error) {
@@ -210,7 +322,10 @@ func (c *FeedCache) SetStats(ctx context.Context, stats map[int64]*domainfeed.Fe
 		if err != nil {
 			return err
 		}
-		pipe.Set(ctx, feedStatKey(stat.VideoID), content, ttl)
+		key := feedStatKey(stat.VideoID)
+		entryTTL := jitterTTL(key, ttl)
+		pipe.Set(ctx, key, content, entryTTL)
+		c.local.set(key, content, minTTL(entryTTL, localStatCacheTTL))
 		queued = true
 	}
 	if !queued {
@@ -226,7 +341,13 @@ func (c *FeedCache) SetVideoStat(ctx context.Context, stat *domaininteraction.Vi
 	if stat == nil || stat.VideoID <= 0 {
 		return nil
 	}
-	err := setActionStatJSON(ctx, c.client, feedStatKey(stat.VideoID), videoStatToFeedStat(stat))
+	feedStat := videoStatToFeedStat(stat)
+	err := setActionStatJSON(ctx, c.client, feedStatKey(stat.VideoID), feedStat)
+	if err == nil {
+		if content, marshalErr := json.Marshal(feedStat); marshalErr == nil {
+			c.local.set(feedStatKey(stat.VideoID), content, localStatCacheTTL)
+		}
+	}
 	inframetrics.ObserveCacheWrite("stat", 1, err)
 	return err
 }
@@ -434,7 +555,118 @@ func (c *FeedCache) BootstrapFollowingIndex(ctx context.Context, viewerID int64,
 }
 
 func (c *FeedCache) InvalidateFollowingIndex(ctx context.Context, viewerID int64) error {
-	return c.client.Del(ctx, followingInboxKey(viewerID), followingSnapshotKey(viewerID)).Err()
+	return c.client.Del(ctx,
+		followingInboxKey(viewerID),
+		followingSnapshotKey(viewerID),
+		followingAuthorsKey(viewerID),
+		followingPullAuthorsKey(viewerID),
+		followingAuthorsReadyKey(viewerID),
+	).Err()
+}
+
+// GetFollowingAuthorIDs 读取关注作者快照；ready 键用于区分空集合和缓存未命中。
+func (c *FeedCache) GetFollowingAuthorIDs(ctx context.Context, viewerID int64) ([]int64, []int64, bool, error) {
+	if viewerID <= 0 {
+		return nil, nil, false, nil
+	}
+	pipe := c.client.Pipeline()
+	readyCmd := pipe.Exists(ctx, followingAuthorsReadyKey(viewerID))
+	authorCmd := pipe.SMembers(ctx, followingAuthorsKey(viewerID))
+	pullCmd := pipe.SMembers(ctx, followingPullAuthorsKey(viewerID))
+	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
+		inframetrics.ObserveCacheRead("following", 1, 0, err)
+		return nil, nil, false, err
+	}
+	if readyCmd.Val() == 0 {
+		inframetrics.ObserveCacheRead("following", 1, 0, nil)
+		return nil, nil, false, nil
+	}
+	authorIDs, err := parseIDStrings(authorCmd.Val())
+	if err != nil {
+		return nil, nil, false, err
+	}
+	pullAuthorIDs, err := parseIDStrings(pullCmd.Val())
+	if err != nil {
+		return nil, nil, false, err
+	}
+	inframetrics.ObserveCacheRead("following", 1, 1, nil)
+	return authorIDs, pullAuthorIDs, true, nil
+}
+
+// SetFollowingAuthorIDs 使用两个 SET 保存全部关注和大 V 子集。
+func (c *FeedCache) SetFollowingAuthorIDs(ctx context.Context, viewerID int64, authorIDs []int64, pullAuthorIDs []int64) error {
+	if viewerID <= 0 {
+		return nil
+	}
+	ttl := jitterTTL(followingAuthorsReadyKey(viewerID), followingRelationCacheTTL)
+	readyTTL := ttl - time.Second
+	pipe := c.client.Pipeline()
+	authorKey := followingAuthorsKey(viewerID)
+	pullKey := followingPullAuthorsKey(viewerID)
+	pipe.Del(ctx, authorKey, pullKey)
+	if values := redisIDValues(authorIDs); len(values) > 0 {
+		pipe.SAdd(ctx, authorKey, values...)
+		pipe.Expire(ctx, authorKey, ttl)
+	}
+	if values := redisIDValues(pullAuthorIDs); len(values) > 0 {
+		pipe.SAdd(ctx, pullKey, values...)
+		pipe.Expire(ctx, pullKey, ttl)
+	}
+	// ready 先于集合过期，避免过期边界把已消失的集合误判成“已缓存的空集合”。
+	pipe.Set(ctx, followingAuthorsReadyKey(viewerID), "1", readyTTL)
+	_, err := pipe.Exec(ctx)
+	inframetrics.ObserveCacheWrite("following", len(authorIDs), err)
+	return err
+}
+
+// MarkSeen 将曝光写入固定大小 Bloom Bitmap，避免每个用户的 Seen Key 无界增长。
+func (c *FeedCache) MarkSeen(ctx context.Context, userID int64, videoID int64) error {
+	if userID <= 0 || videoID <= 0 {
+		return nil
+	}
+	key := seenKey(userID)
+	pipe := c.client.Pipeline()
+	for _, offset := range seenOffsets(videoID) {
+		pipe.SetBit(ctx, key, int64(offset), 1)
+	}
+	pipe.Expire(ctx, key, seenCacheTTL)
+	_, err := pipe.Exec(ctx)
+	inframetrics.ObserveCacheWrite("seen", 1, err)
+	return err
+}
+
+// SeenVideoIDs 批量查询 Bloom Bitmap；三个位均存在时判定为已曝光。
+func (c *FeedCache) SeenVideoIDs(ctx context.Context, userID int64, videoIDs []int64) (map[int64]struct{}, error) {
+	seen := make(map[int64]struct{})
+	if userID <= 0 || len(videoIDs) == 0 {
+		return seen, nil
+	}
+	pipe := c.client.Pipeline()
+	commands := make([][]*redis.IntCmd, len(videoIDs))
+	key := seenKey(userID)
+	for index, videoID := range videoIDs {
+		for _, offset := range seenOffsets(videoID) {
+			commands[index] = append(commands[index], pipe.GetBit(ctx, key, int64(offset)))
+		}
+	}
+	if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
+		inframetrics.ObserveCacheRead("seen", len(videoIDs), 0, err)
+		return nil, err
+	}
+	for index, bits := range commands {
+		matched := len(bits) == seenBloomHashes
+		for _, bit := range bits {
+			if bit.Val() == 0 {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			seen[videoIDs[index]] = struct{}{}
+		}
+	}
+	inframetrics.ObserveCacheRead("seen", len(videoIDs), len(seen), nil)
+	return seen, nil
 }
 
 // AddHotScore 把一次互动热度写入 1 分钟粒度的热榜桶。
@@ -781,6 +1013,15 @@ func cacheKeys(videoIDs []int64, build func(int64) string) []string {
 	return keys
 }
 
+func jitterTTL(key string, ttl time.Duration) time.Duration {
+	if ttl <= 0 {
+		return ttl
+	}
+	hasher := fnv.New32a()
+	_, _ = hasher.Write([]byte(key))
+	return ttl + time.Duration(10+hasher.Sum32()%11)*ttl/100
+}
+
 func feedCardKey(videoID int64) string {
 	return fmt.Sprintf("video:card:v1:%d", videoID)
 }
@@ -799,6 +1040,56 @@ func followingAuthorOutboxKey(authorID int64) string {
 
 func followingSnapshotKey(userID int64) string {
 	return fmt.Sprintf("feed:following:snapshot:v2:%d", userID)
+}
+
+func followingAuthorsKey(userID int64) string {
+	return fmt.Sprintf("user:following:v1:%d", userID)
+}
+
+func followingPullAuthorsKey(userID int64) string {
+	return fmt.Sprintf("user:following:pull:v1:%d", userID)
+}
+
+func followingAuthorsReadyKey(userID int64) string {
+	return fmt.Sprintf("user:following:ready:v1:%d", userID)
+}
+
+func seenKey(userID int64) string {
+	return fmt.Sprintf("feed:seen:v1:%d", userID)
+}
+
+func seenOffsets(videoID int64) []uint64 {
+	value := strconv.FormatInt(videoID, 10)
+	offsets := make([]uint64, 0, seenBloomHashes)
+	for seed := byte(0); seed < seenBloomHashes; seed++ {
+		hasher := fnv.New64a()
+		_, _ = hasher.Write([]byte{seed})
+		_, _ = hasher.Write([]byte(value))
+		offsets = append(offsets, hasher.Sum64()%seenBloomBits)
+	}
+	return offsets
+}
+
+func redisIDValues(ids []int64) []any {
+	values := make([]any, 0, len(ids))
+	for _, id := range ids {
+		if id > 0 {
+			values = append(values, id)
+		}
+	}
+	return values
+}
+
+func parseIDStrings(values []string) ([]int64, error) {
+	ids := make([]int64, 0, len(values))
+	for _, value := range values {
+		id, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || id <= 0 {
+			return nil, fmt.Errorf("invalid cached id %q", value)
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
 }
 
 func followingIndexMember(videoID int64, authorID int64, publishedAt time.Time) string {
