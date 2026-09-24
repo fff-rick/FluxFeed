@@ -173,11 +173,7 @@ func (s *FollowingCandidateSource) Load(ctx context.Context, req FeedRequest, li
 			}
 		}
 		if cacheErr == nil && ready && (complete || !timelineCursorAtOrBefore(cursor, oldest)) {
-			authorIDs, err := s.repo.ListFollowingAuthorIDs(ctx, req.ViewerID)
-			if err != nil {
-				return nil, ErrLoadFeedFailed
-			}
-			pullAuthorIDs, err := s.repo.ListFollowingPullAuthorIDs(ctx, req.ViewerID)
+			authorIDs, pullAuthorIDs, err := s.followingAuthorIDs(ctx, req.ViewerID)
 			if err != nil {
 				return nil, ErrLoadFeedFailed
 			}
@@ -194,6 +190,27 @@ func (s *FollowingCandidateSource) Load(ctx context.Context, req FeedRequest, li
 		}
 	}
 	return timelinePage(domainfeed.SceneFollowing, items, limit), nil
+}
+
+func (s *FollowingCandidateSource) followingAuthorIDs(ctx context.Context, viewerID int64) ([]int64, []int64, error) {
+	relationCache, _ := s.index.(FollowingRelationCache)
+	if relationCache != nil {
+		if authorIDs, pullAuthorIDs, ok, err := relationCache.GetFollowingAuthorIDs(ctx, viewerID); err == nil && ok {
+			return authorIDs, pullAuthorIDs, nil
+		}
+	}
+	authorIDs, err := s.repo.ListFollowingAuthorIDs(ctx, viewerID)
+	if err != nil {
+		return nil, nil, err
+	}
+	pullAuthorIDs, err := s.repo.ListFollowingPullAuthorIDs(ctx, viewerID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if relationCache != nil {
+		_ = relationCache.SetFollowingAuthorIDs(ctx, viewerID, authorIDs, pullAuthorIDs)
+	}
+	return authorIDs, pullAuthorIDs, nil
 }
 
 func timelineCursorAtOrBefore(cursor *domainfeed.TimelineCursor, oldest *domainfeed.TimelineCursor) bool {

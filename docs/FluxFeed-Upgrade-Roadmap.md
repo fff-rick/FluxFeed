@@ -174,6 +174,17 @@ Inbox + 大V内容
 
 ## Stage 4：Redis Feed Cache 工程化
 
+**状态：已完成。** 第一批已完成 Feed 页、视频卡片和实时计数的
+`L1 Local Cache -> L2 Redis -> singleflight -> MySQL -> Cache Fill` 主链路；
+L1 采用 10,000 项有界短 TTL 缓存，L2 批量读写使用 MGET/Pipeline，视频卡片
+空结果写入短期负缓存，所有逐项缓存 TTL 加稳定随机抖动。Redis 局部故障时
+保留 L1 命中并仅回源缺失项。
+
+第二批已完成 `user:following:*` 关注作者快照及关注变更失效、每用户固定
+32 KiB 的 `feed:seen:*` Bloom Bitmap、推荐流已曝光过滤，以及 Timeline 页
+stale-while-revalidate 异步刷新。缓存专项 k6 场景、本地 benchmark、Prometheus
+命中率查询和 P95 验收基线已补齐，后续按实际压测结果调整容量与 TTL。
+
 ### 目标
 
 建立面向 Feed 场景设计的缓存体系。

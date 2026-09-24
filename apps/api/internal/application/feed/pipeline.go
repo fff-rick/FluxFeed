@@ -4,6 +4,8 @@ import (
 	domainfeed "FluxFeed/internal/domain/feed"
 	"context"
 	"sort"
+
+	"golang.org/x/sync/singleflight"
 )
 
 type CandidateMerger interface {
@@ -47,6 +49,35 @@ func (DeduplicateFilter) Filter(_ context.Context, _ FeedRequest, items []*domai
 			continue
 		}
 		seen[item.VideoID] = struct{}{}
+		result = append(result, item)
+	}
+	return result
+}
+
+// SeenFilter 在推荐场景过滤已曝光视频；缓存不可用时失败开放，避免整条 Feed 不可用。
+type SeenFilter struct{ Cache SeenCache }
+
+func (f SeenFilter) Filter(ctx context.Context, req FeedRequest, items []*domainfeed.FeedPageItem) []*domainfeed.FeedPageItem {
+	if f.Cache == nil || req.ViewerID <= 0 || len(items) == 0 {
+		return items
+	}
+	videoIDs := make([]int64, 0, len(items))
+	for _, item := range items {
+		if item != nil && item.VideoID > 0 {
+			videoIDs = append(videoIDs, item.VideoID)
+		}
+	}
+	seen, err := f.Cache.SeenVideoIDs(ctx, req.ViewerID, videoIDs)
+	if err != nil || len(seen) == 0 {
+		return items
+	}
+	result := make([]*domainfeed.FeedPageItem, 0, len(items))
+	for _, item := range items {
+		if item != nil {
+			if _, ok := seen[item.VideoID]; ok {
+				continue
+			}
+		}
 		result = append(result, item)
 	}
 	return result
@@ -168,8 +199,10 @@ func assemblePipelineResult(ctx context.Context, req FeedRequest, scene domainfe
 }
 
 type FeedAssembler struct {
-	repo  domainfeed.Repository
-	cache FeedCache
+	repo      domainfeed.Repository
+	cache     FeedCache
+	cardGroup singleflight.Group
+	statGroup singleflight.Group
 }
 
 func NewFeedAssembler(repo domainfeed.Repository, cache FeedCache) *FeedAssembler {
@@ -177,5 +210,5 @@ func NewFeedAssembler(repo domainfeed.Repository, cache FeedCache) *FeedAssemble
 }
 
 func (a *FeedAssembler) Assemble(ctx context.Context, req FeedRequest, items []*domainfeed.FeedPageItem) ([]*domainfeed.FeedItem, error) {
-	return assembleFeedItems(ctx, a.repo, a.cache, items, req.ViewerID)
+	return assembleFeedItems(ctx, a.repo, a.cache, items, req.ViewerID, &a.cardGroup, &a.statGroup)
 }

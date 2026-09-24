@@ -32,6 +32,7 @@ type Service struct {
 	router       *FeedRouter
 	defaultScene domainfeed.Scene
 	cache        FeedCache
+	assembler    *FeedAssembler
 }
 
 // Option 用于在装配阶段注册额外 Feed 策略。
@@ -79,6 +80,19 @@ type FollowingIndexCache interface {
 	BootstrapFollowingIndex(ctx context.Context, viewerID int64, items []*domainfeed.FeedPageItem, complete bool) error
 }
 
+type FollowingRelationCache interface {
+	GetFollowingAuthorIDs(ctx context.Context, viewerID int64) (authorIDs []int64, pullAuthorIDs []int64, ok bool, err error)
+	SetFollowingAuthorIDs(ctx context.Context, viewerID int64, authorIDs []int64, pullAuthorIDs []int64) error
+}
+
+type SeenCache interface {
+	SeenVideoIDs(ctx context.Context, userID int64, videoIDs []int64) (map[int64]struct{}, error)
+}
+
+type StalePageCache interface {
+	GetPageState(ctx context.Context, key string) (page *FeedPage, ok bool, stale bool, err error)
+}
+
 // Strategy 定义单个 Feed 场景的读取策略。
 type Strategy interface {
 	Scene() domainfeed.Scene
@@ -93,12 +107,14 @@ type TimelineStrategy struct {
 	firstPageTTL time.Duration
 	pageTTL      time.Duration
 	group        singleflight.Group
+	assembler    *FeedAssembler
 }
 
 // HotStrategy 使用互动热度读取热榜 Feed。
 type HotStrategy struct {
-	repo  domainfeed.Repository
-	cache FeedCache
+	repo      domainfeed.Repository
+	cache     FeedCache
+	assembler *FeedAssembler
 }
 
 // FollowingStrategy 使用推拉混合模式读取关注流。
@@ -106,6 +122,7 @@ type FollowingStrategy struct {
 	repo           domainfeed.Repository
 	cache          FeedCache
 	followingIndex FollowingIndexCache
+	assembler      *FeedAssembler
 }
 
 // RecommendStrategy 使用推荐服务读取排序后的候选，再复用 Feed 卡片组装。
@@ -113,6 +130,7 @@ type RecommendStrategy struct {
 	repo        domainfeed.Repository
 	cache       FeedCache
 	recommender Recommender
+	assembler   *FeedAssembler
 }
 
 type Recommender interface {
@@ -143,6 +161,7 @@ func WithStrategy(strategy Strategy) Option {
 func WithFeedCache(cache FeedCache) Option {
 	return func(s *Service) {
 		s.cache = cache
+		s.assembler.cache = cache
 		s.router.Range(func(strategy Strategy) {
 			switch typed := strategy.(type) {
 			case *TimelineStrategy:
@@ -178,6 +197,7 @@ func New(repo domainfeed.Repository, options ...Option) *Service {
 		repo:         repo,
 		router:       NewFeedRouter(),
 		defaultScene: domainfeed.DefaultScene,
+		assembler:    NewFeedAssembler(repo, nil),
 	}
 	service.RegisterStrategy(NewTimelineStrategy(domainfeed.SceneTimeline, repo))
 	service.RegisterStrategy(NewHotStrategy(repo))
@@ -193,7 +213,21 @@ func (s *Service) RegisterStrategy(strategy Strategy) {
 	if strategy == nil {
 		return
 	}
+	s.setStrategyAssembler(strategy)
 	s.router.Register(strategy)
+}
+
+func (s *Service) setStrategyAssembler(strategy Strategy) {
+	switch typed := strategy.(type) {
+	case *TimelineStrategy:
+		typed.assembler = s.assembler
+	case *HotStrategy:
+		typed.assembler = s.assembler
+	case *FollowingStrategy:
+		typed.assembler = s.assembler
+	case *RecommendStrategy:
+		typed.assembler = s.assembler
+	}
 }
 
 // GetFeed 根据 scene 选择策略并返回分页结果。
@@ -234,6 +268,7 @@ func NewTimelineStrategy(scene domainfeed.Scene, repo domainfeed.Repository) *Ti
 		repo:         repo,
 		firstPageTTL: timelineFirstPageCacheTTL,
 		pageTTL:      timelinePageCacheTTL,
+		assembler:    NewFeedAssembler(repo, nil),
 	}
 }
 
@@ -250,19 +285,19 @@ func (s *TimelineStrategy) List(ctx context.Context, req FeedRequest) (*FeedResu
 	}
 	limit := normalizeLimit(req.Limit)
 
-	page, err := loadFeedPage(ctx, s.cache, s.scene, req.Cursor, limit, s.firstPageTTL, s.pageTTL, &s.group, func() (*FeedPage, error) {
-		return NewTimelineCandidateSource(s.scene, s.repo).Load(ctx, req, limit)
+	page, err := loadFeedPage(ctx, s.cache, s.scene, req.Cursor, limit, s.firstPageTTL, s.pageTTL, &s.group, func(loadCtx context.Context) (*FeedPage, error) {
+		return NewTimelineCandidateSource(s.scene, s.repo).Load(loadCtx, req, limit)
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	return assemblePipelineResult(ctx, req, s.scene, []*FeedPage{page}, NewCandidatePipeline(LatestRanker{}), limit, NewFeedAssembler(s.repo, s.cache))
+	return assemblePipelineResult(ctx, req, s.scene, []*FeedPage{page}, NewCandidatePipeline(LatestRanker{}), limit, s.assembler)
 }
 
 // NewHotStrategy 创建热榜排序策略。
 func NewHotStrategy(repo domainfeed.Repository) *HotStrategy {
-	return &HotStrategy{repo: repo}
+	return &HotStrategy{repo: repo, assembler: NewFeedAssembler(repo, nil)}
 }
 
 // Scene 返回热榜场景。
@@ -283,12 +318,12 @@ func (s *HotStrategy) List(ctx context.Context, req FeedRequest) (*FeedResult, e
 	if err != nil {
 		return nil, err
 	}
-	return assemblePipelineResult(ctx, req, domainfeed.SceneHot, []*FeedPage{page}, NewCandidatePipeline(HotRanker{}), limit, NewFeedAssembler(s.repo, s.cache))
+	return assemblePipelineResult(ctx, req, domainfeed.SceneHot, []*FeedPage{page}, NewCandidatePipeline(HotRanker{}), limit, s.assembler)
 }
 
 // NewFollowingStrategy 创建关注流推拉混合策略。
 func NewFollowingStrategy(repo domainfeed.Repository) *FollowingStrategy {
-	return &FollowingStrategy{repo: repo}
+	return &FollowingStrategy{repo: repo, assembler: NewFeedAssembler(repo, nil)}
 }
 
 // Scene 返回关注流场景。
@@ -311,7 +346,7 @@ func (s *FollowingStrategy) List(ctx context.Context, req FeedRequest) (*FeedRes
 	if err != nil {
 		return nil, err
 	}
-	return assemblePipelineResult(ctx, req, domainfeed.SceneFollowing, []*FeedPage{page}, NewCandidatePipeline(LatestRanker{}), limit, NewFeedAssembler(s.repo, s.cache))
+	return assemblePipelineResult(ctx, req, domainfeed.SceneFollowing, []*FeedPage{page}, NewCandidatePipeline(LatestRanker{}), limit, s.assembler)
 }
 
 // NewRecommendStrategy 创建推荐 Feed 策略。
@@ -319,6 +354,7 @@ func NewRecommendStrategy(repo domainfeed.Repository, recommender Recommender) *
 	return &RecommendStrategy{
 		repo:        repo,
 		recommender: recommender,
+		assembler:   NewFeedAssembler(repo, nil),
 	}
 }
 
@@ -344,7 +380,10 @@ func (s *RecommendStrategy) List(ctx context.Context, req FeedRequest) (*FeedRes
 		return nil, err
 	}
 	pipeline := NewCandidatePipeline(PreserveOrderRanker{}, AuthorDiversityMixer{})
-	return assemblePipelineResult(ctx, req, domainfeed.SceneRecommend, pages, pipeline, limit, NewFeedAssembler(s.repo, s.cache))
+	if seenCache, ok := s.cache.(SeenCache); ok {
+		pipeline.Filters = append(pipeline.Filters, SeenFilter{Cache: seenCache})
+	}
+	return assemblePipelineResult(ctx, req, domainfeed.SceneRecommend, pages, pipeline, limit, s.assembler)
 }
 
 func (s *RecommendStrategy) followingIndex() FollowingIndexCache {
@@ -375,21 +414,26 @@ func clientContextValue(context map[string]string, key string) string {
 	return context[key]
 }
 
-func loadFeedPage(ctx context.Context, cache FeedCache, scene domainfeed.Scene, cursor string, limit int, firstPageTTL time.Duration, pageTTL time.Duration, group *singleflight.Group, load func() (*FeedPage, error)) (*FeedPage, error) {
+func loadFeedPage(ctx context.Context, cache FeedCache, scene domainfeed.Scene, cursor string, limit int, firstPageTTL time.Duration, pageTTL time.Duration, group *singleflight.Group, load func(context.Context) (*FeedPage, error)) (*FeedPage, error) {
 	if cache == nil || group == nil {
-		return load()
+		return load(ctx)
 	}
 
 	cacheKey := feedPageCacheKey(scene, cursor, limit)
-	if page, ok, err := cache.GetPage(ctx, cacheKey); err == nil && ok {
+	page, ok, stale := getCachedPage(ctx, cache, cacheKey)
+	if ok && !stale {
+		return page, nil
+	}
+	if ok {
+		go refreshFeedPage(cache, cacheKey, cursor, firstPageTTL, pageTTL, group, load)
 		return page, nil
 	}
 
 	value, err, _ := group.Do(cacheKey, func() (any, error) {
-		if page, ok, err := cache.GetPage(ctx, cacheKey); err == nil && ok {
+		if page, ok, _ := getCachedPage(ctx, cache, cacheKey); ok {
 			return page, nil
 		}
-		page, err := load()
+		page, err := load(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -399,14 +443,36 @@ func loadFeedPage(ctx context.Context, cache FeedCache, scene domainfeed.Scene, 
 	if err != nil {
 		return nil, err
 	}
-	page, ok := value.(*FeedPage)
+	page, ok = value.(*FeedPage)
 	if !ok {
 		return nil, ErrLoadFeedFailed
 	}
 	return page, nil
 }
 
-func assembleFeedItems(ctx context.Context, repo domainfeed.Repository, cache FeedCache, pageItems []*domainfeed.FeedPageItem, viewerID int64) ([]*domainfeed.FeedItem, error) {
+func getCachedPage(ctx context.Context, cache FeedCache, key string) (*FeedPage, bool, bool) {
+	if staleCache, ok := cache.(StalePageCache); ok {
+		page, found, stale, err := staleCache.GetPageState(ctx, key)
+		return page, err == nil && found, stale
+	}
+	page, found, err := cache.GetPage(ctx, key)
+	return page, err == nil && found, false
+}
+
+func refreshFeedPage(cache FeedCache, key string, cursor string, firstPageTTL time.Duration, pageTTL time.Duration, group *singleflight.Group, load func(context.Context) (*FeedPage, error)) {
+	refreshCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, _, _ = group.Do(key, func() (any, error) {
+		page, err := load(refreshCtx)
+		if err != nil {
+			return nil, err
+		}
+		_ = cache.SetPage(refreshCtx, key, page, feedPageCacheTTL(cursor, key, firstPageTTL, pageTTL))
+		return page, nil
+	})
+}
+
+func assembleFeedItems(ctx context.Context, repo domainfeed.Repository, cache FeedCache, pageItems []*domainfeed.FeedPageItem, viewerID int64, cardGroup *singleflight.Group, statGroup *singleflight.Group) ([]*domainfeed.FeedItem, error) {
 	videoIDs := feedPageVideoIDs(pageItems)
 	if len(videoIDs) == 0 {
 		return []*domainfeed.FeedItem{}, nil
@@ -425,9 +491,14 @@ func assembleFeedItems(ctx context.Context, repo domainfeed.Repository, cache Fe
 
 	missingCardIDs := missingCardIDs(videoIDs, cards)
 	if len(missingCardIDs) > 0 {
-		loadedCards, err := repo.BatchGetFeedCards(ctx, missingCardIDs)
+		loadedCards, err := loadCards(ctx, repo, missingCardIDs, cardGroup)
 		if err != nil {
 			return nil, err
+		}
+		for _, videoID := range missingCardIDs {
+			if _, ok := loadedCards[videoID]; !ok {
+				loadedCards[videoID] = nil
+			}
 		}
 		mergeCards(cards, loadedCards)
 		if cache != nil {
@@ -437,7 +508,7 @@ func assembleFeedItems(ctx context.Context, repo domainfeed.Repository, cache Fe
 
 	missingStatIDs := missingStatIDs(videoIDs, stats)
 	if len(missingStatIDs) > 0 {
-		loadedStats, err := repo.BatchGetFeedStats(ctx, missingStatIDs)
+		loadedStats, err := loadStats(ctx, repo, missingStatIDs, statGroup)
 		if err != nil {
 			return nil, err
 		}
@@ -497,6 +568,46 @@ func assembleFeedItems(ctx context.Context, repo domainfeed.Repository, cache Fe
 	return items, nil
 }
 
+func loadCards(ctx context.Context, repo domainfeed.Repository, videoIDs []int64, group *singleflight.Group) (map[int64]*domainfeed.FeedCard, error) {
+	if group == nil {
+		return repo.BatchGetFeedCards(ctx, videoIDs)
+	}
+	value, err, _ := group.Do(idListKey("cards", videoIDs), func() (any, error) {
+		return repo.BatchGetFeedCards(ctx, videoIDs)
+	})
+	if err != nil {
+		return nil, err
+	}
+	loaded := value.(map[int64]*domainfeed.FeedCard)
+	result := make(map[int64]*domainfeed.FeedCard, len(loaded))
+	for videoID, card := range loaded {
+		result[videoID] = card
+	}
+	return result, nil
+}
+
+func loadStats(ctx context.Context, repo domainfeed.Repository, videoIDs []int64, group *singleflight.Group) (map[int64]*domainfeed.FeedStat, error) {
+	if group == nil {
+		return repo.BatchGetFeedStats(ctx, videoIDs)
+	}
+	value, err, _ := group.Do(idListKey("stats", videoIDs), func() (any, error) {
+		return repo.BatchGetFeedStats(ctx, videoIDs)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return value.(map[int64]*domainfeed.FeedStat), nil
+}
+
+func idListKey(prefix string, videoIDs []int64) string {
+	var builder strings.Builder
+	builder.WriteString(prefix)
+	for _, videoID := range videoIDs {
+		fmt.Fprintf(&builder, ":%d", videoID)
+	}
+	return builder.String()
+}
+
 func feedPageVideoIDs(items []*domainfeed.FeedPageItem) []int64 {
 	videoIDs := make([]int64, 0, len(items))
 	seen := map[int64]struct{}{}
@@ -516,7 +627,7 @@ func feedPageVideoIDs(items []*domainfeed.FeedPageItem) []int64 {
 func missingCardIDs(videoIDs []int64, cards map[int64]*domainfeed.FeedCard) []int64 {
 	missing := make([]int64, 0)
 	for _, videoID := range videoIDs {
-		if cards[videoID] == nil {
+		if _, ok := cards[videoID]; !ok {
 			missing = append(missing, videoID)
 		}
 	}
@@ -535,9 +646,7 @@ func missingStatIDs(videoIDs []int64, stats map[int64]*domainfeed.FeedStat) []in
 
 func mergeCards(target map[int64]*domainfeed.FeedCard, source map[int64]*domainfeed.FeedCard) {
 	for videoID, card := range source {
-		if card != nil {
-			target[videoID] = card
-		}
+		target[videoID] = card
 	}
 }
 

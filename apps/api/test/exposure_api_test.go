@@ -57,6 +57,18 @@ type memoryViewEventPublisher struct {
 	events []*applicationexposure.ViewEventRecordedEvent
 }
 
+type memorySeenRecorder struct {
+	mu     sync.Mutex
+	marked []int64
+}
+
+func (r *memorySeenRecorder) MarkSeen(_ context.Context, _ int64, videoID int64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.marked = append(r.marked, videoID)
+	return nil
+}
+
 func newMemoryExposureRepo() *memoryExposureRepo {
 	return &memoryExposureRepo{
 		nextID:    1,
@@ -232,6 +244,22 @@ func TestExposurePublishesViewEvent(t *testing.T) {
 	requireStatus(t, missingVideoResponse, http.StatusNotFound)
 	if len(publisher.Events()) != 1 {
 		t.Fatalf("published event after failed save")
+	}
+}
+
+func TestExposureMarksSeenOnlyForExposureEvents(t *testing.T) {
+	recorder := &memorySeenRecorder{}
+	service := applicationexposure.New(newMemoryExposureRepo(), applicationexposure.WithSeenRecorder(recorder))
+	if _, err := service.RecordViewEvent(context.Background(), 42, 1001, "recommend", "seen-1", "exposed", 0, false); err != nil {
+		t.Fatalf("record exposure: %v", err)
+	}
+	if _, err := service.RecordViewEvent(context.Background(), 42, 1001, "recommend", "seen-2", "complete", 1000, true); err != nil {
+		t.Fatalf("record completion: %v", err)
+	}
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	if len(recorder.marked) != 1 || recorder.marked[0] != 1001 {
+		t.Fatalf("unexpected seen writes: %v", recorder.marked)
 	}
 }
 

@@ -225,3 +225,69 @@ func TestActionStatBaseInitUsesInitialStat(t *testing.T) {
 		t.Fatalf("unexpected stat: %+v", stat)
 	}
 }
+
+func TestLocalCacheExpiresAndStaysBounded(t *testing.T) {
+	cache := newLocalCache(1)
+	cache.set("first", []byte("one"), time.Minute)
+	cache.set("second", []byte("two"), time.Minute)
+	if _, ok := cache.get("first"); ok {
+		t.Fatal("expected capacity eviction")
+	}
+	value, ok := cache.get("second")
+	if !ok || string(value) != "two" {
+		t.Fatalf("unexpected cached value: %q, %v", value, ok)
+	}
+
+	cache.set("expired", []byte("gone"), time.Nanosecond)
+	time.Sleep(time.Millisecond)
+	if _, ok := cache.get("expired"); ok {
+		t.Fatal("expected expired value to be removed")
+	}
+}
+
+func TestLocalCacheStaleWindow(t *testing.T) {
+	cache := newLocalCache(1)
+	cache.setStale("page", []byte("value"), time.Millisecond, time.Minute)
+	time.Sleep(2 * time.Millisecond)
+	if _, ok := cache.get("page"); ok {
+		t.Fatal("expected soft-expired value to miss fresh lookup")
+	}
+	value, ok := cache.getStale("page")
+	if !ok || string(value) != "value" {
+		t.Fatalf("unexpected stale value: %q, %v", value, ok)
+	}
+}
+
+func TestSeenOffsetsAreStableAndBounded(t *testing.T) {
+	first := seenOffsets(1001)
+	second := seenOffsets(1001)
+	if len(first) != seenBloomHashes || len(second) != seenBloomHashes {
+		t.Fatalf("unexpected hash count: %v", first)
+	}
+	for index := range first {
+		if first[index] != second[index] || first[index] >= seenBloomBits {
+			t.Fatalf("unexpected bloom offset: %v", first)
+		}
+	}
+}
+
+func TestParseFollowingAuthorIDs(t *testing.T) {
+	ids, err := parseIDStrings([]string{"42", "77"})
+	if err != nil || len(ids) != 2 || ids[0] != 42 || ids[1] != 77 {
+		t.Fatalf("unexpected cached ids: %v, %v", ids, err)
+	}
+	if _, err := parseIDStrings([]string{"bad"}); err == nil {
+		t.Fatal("expected invalid cached id error")
+	}
+}
+
+func TestJitterTTLIsStableAndSpread(t *testing.T) {
+	base := time.Minute
+	first := jitterTTL("video:meta:1", base)
+	if first != jitterTTL("video:meta:1", base) {
+		t.Fatal("expected stable jitter for the same key")
+	}
+	if first < base+base/10 || first > base+base/5 {
+		t.Fatalf("jitter outside expected range: %s", first)
+	}
+}
