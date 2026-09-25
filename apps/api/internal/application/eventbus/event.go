@@ -39,6 +39,12 @@ type Bus interface {
 	Close() error
 }
 
+// ConsumerDeduplicator 记录消费组已经成功处理的事件，避免 Kafka 重投时重复执行业务逻辑。
+type ConsumerDeduplicator interface {
+	IsProcessed(ctx context.Context, group string, eventID string) (bool, error)
+	MarkProcessed(ctx context.Context, group string, eventID string) error
+}
+
 func New(id string, eventType string, userID int64, videoID int64, occurredAt time.Time, payload any) (*Event, error) {
 	id = strings.TrimSpace(id)
 	eventType = strings.TrimSpace(eventType)

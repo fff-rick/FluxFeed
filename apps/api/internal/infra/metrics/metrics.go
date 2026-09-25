@@ -88,6 +88,51 @@ var (
 		[]string{"backend", "event_type", "operation", "result"},
 	)
 
+	KafkaConsumerRetriesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "gcfeed",
+			Name:      "kafka_consumer_retries_total",
+			Help:      "Kafka consumer handler retries by group and event type.",
+		},
+		[]string{"group", "event_type"},
+	)
+
+	KafkaDLQEventsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "gcfeed",
+			Name:      "kafka_dlq_events_total",
+			Help:      "Events sent to Kafka dead-letter topics by group and event type.",
+		},
+		[]string{"group", "event_type", "result"},
+	)
+
+	KafkaConsumerDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: "gcfeed",
+			Name:      "kafka_consumer_processing_duration_seconds",
+			Help:      "Kafka event processing duration including retries.",
+			Buckets:   []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30},
+		},
+		[]string{"group", "event_type", "result"},
+	)
+
+	OutboxEvents = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: "gcfeed",
+			Name:      "outbox_events",
+			Help:      "Current outbox event count by status.",
+		},
+		[]string{"status"},
+	)
+
+	OutboxOldestPendingAge = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: "gcfeed",
+			Name:      "outbox_oldest_pending_age_seconds",
+			Help:      "Age of the oldest pending outbox event in seconds.",
+		},
+	)
+
 	VideoUploadTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: "gcfeed",
@@ -147,12 +192,42 @@ func init() {
 		FeedCacheRequestsTotal,
 		FeedCacheWritesTotal,
 		EventBusEventsTotal,
+		KafkaConsumerRetriesTotal,
+		KafkaDLQEventsTotal,
+		KafkaConsumerDuration,
+		OutboxEvents,
+		OutboxOldestPendingAge,
 		VideoUploadTotal,
 		VideoUploadDuration,
 		VideoProcessingDuration,
 		WorkerJobsTotal,
 		WorkerJobDuration,
 	)
+}
+
+func SetOutboxStatus(pending int64, failed int64, oldestPendingAt *time.Time) {
+	OutboxEvents.WithLabelValues("pending").Set(float64(pending))
+	OutboxEvents.WithLabelValues("failed").Set(float64(failed))
+	age := 0.0
+	if oldestPendingAt != nil {
+		age = time.Since(*oldestPendingAt).Seconds()
+		if age < 0 {
+			age = 0
+		}
+	}
+	OutboxOldestPendingAge.Set(age)
+}
+
+func ObserveKafkaRetry(group string, eventType string) {
+	KafkaConsumerRetriesTotal.WithLabelValues(normalizeLabel(group, "unknown"), normalizeLabel(eventType, "unknown")).Inc()
+}
+
+func ObserveKafkaDLQ(group string, eventType string, err error) {
+	KafkaDLQEventsTotal.WithLabelValues(normalizeLabel(group, "unknown"), normalizeLabel(eventType, "unknown"), resultLabel(err)).Inc()
+}
+
+func ObserveKafkaConsumer(group string, eventType string, duration time.Duration, err error) {
+	KafkaConsumerDuration.WithLabelValues(normalizeLabel(group, "unknown"), normalizeLabel(eventType, "unknown"), resultLabel(err)).Observe(duration.Seconds())
 }
 
 // HTTPMiddleware records request count and latency with stable route labels.

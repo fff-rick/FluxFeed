@@ -1,11 +1,13 @@
 package main
 
 import (
+	applicationeventbus "FluxFeed/internal/application/eventbus"
 	"context"
 	"database/sql"
 	"log"
 	"os/signal"
 	"syscall"
+	"time"
 
 	applicationembedding "FluxFeed/internal/application/embedding"
 	applicationexposure "FluxFeed/internal/application/exposure"
@@ -18,9 +20,11 @@ import (
 	inframetrics "FluxFeed/internal/infra/metrics"
 	inframq "FluxFeed/internal/infra/mq"
 	infraembedding "FluxFeed/internal/infra/persistence/embedding"
+	infraeventbus "FluxFeed/internal/infra/persistence/eventbus"
 	infrafeed "FluxFeed/internal/infra/persistence/feed"
 	infrainteraction "FluxFeed/internal/infra/persistence/interaction"
 	migration "FluxFeed/internal/infra/persistence/migration"
+	infraoutbox "FluxFeed/internal/infra/persistence/outbox"
 	infrarecommendation "FluxFeed/internal/infra/persistence/recommendation"
 
 	gormmysql "gorm.io/driver/mysql"
@@ -52,7 +56,7 @@ func main() {
 		log.Fatalf("auto migrate failed: %v", err)
 	}
 
-	eventBus, err := newWorkerEventBus(cfg)
+	eventBus, err := newWorkerEventBus(cfg, gormDB)
 	if err != nil {
 		log.Fatalf("init event bus failed: %v", err)
 	}
@@ -86,9 +90,9 @@ type recommendationEventConsumer interface {
 	ConsumeViewEventRecordedForRecommendation(ctx context.Context, handler func(context.Context, *applicationexposure.ViewEventRecordedEvent) error) error
 }
 
-func newWorkerEventBus(cfg *infraconfig.Config) (workerEventBus, error) {
+func newWorkerEventBus(cfg *infraconfig.Config, db *gorm.DB) (workerEventBus, error) {
 	if len(cfg.Kafka.Brokers) > 0 {
-		kafka, err := inframq.NewKafka(cfg.Kafka)
+		kafka, err := inframq.NewKafka(cfg.Kafka, inframq.WithConsumerDeduplicator(infraeventbus.NewDeduplicator(db)))
 		if err == nil {
 			log.Printf("event bus enabled: kafka")
 			return inframq.NewFeedEventBus(kafka, cfg.Kafka), nil
@@ -99,6 +103,11 @@ func newWorkerEventBus(cfg *infraconfig.Config) (workerEventBus, error) {
 }
 
 func startWorkers(ctx context.Context, cfg *infraconfig.Config, gormDB *gorm.DB, eventBus workerEventBus) error {
+	if bus, ok := eventBus.(applicationeventbus.Bus); ok {
+		outboxRepo := infraoutbox.New(gormDB)
+		go applicationeventbus.NewOutboxWorker(outboxRepo, bus).Run(ctx)
+		go monitorOutbox(ctx, outboxRepo)
+	}
 	redisClient := infracache.NewRedisClient(cfg.Redis)
 	feedCache := infracache.NewFeedCache(redisClient)
 
@@ -132,6 +141,24 @@ func startWorkers(ctx context.Context, cfg *infraconfig.Config, gormDB *gorm.DB,
 		return applicationrecommendation.NewEventWorker(feedCache, consumer).Start(ctx)
 	}
 	return nil
+}
+
+func monitorOutbox(ctx context.Context, repo *infraoutbox.Repository) {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	for {
+		status, err := repo.Status(ctx)
+		if err != nil {
+			log.Printf("observe outbox status failed: %v", err)
+		} else {
+			inframetrics.SetOutboxStatus(status.Pending, status.Failed, status.OldestPendingAt)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 func closeSQL(db *sql.DB) {

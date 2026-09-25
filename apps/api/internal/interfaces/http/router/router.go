@@ -21,6 +21,7 @@ import (
 	infrainteraction "FluxFeed/internal/infra/persistence/interaction"
 	inframessage "FluxFeed/internal/infra/persistence/message"
 	migration "FluxFeed/internal/infra/persistence/migration"
+	infraoutbox "FluxFeed/internal/infra/persistence/outbox"
 	infraplayback "FluxFeed/internal/infra/persistence/playback"
 	infrarecommendation "FluxFeed/internal/infra/persistence/recommendation"
 	infrarelation "FluxFeed/internal/infra/persistence/relation"
@@ -31,6 +32,7 @@ import (
 	interfaceshttpinteraction "FluxFeed/internal/interfaces/http/interaction"
 	interfaceshttpmessage "FluxFeed/internal/interfaces/http/message"
 	interfaceshttpmiddleware "FluxFeed/internal/interfaces/http/middleware"
+	interfaceshttpoutbox "FluxFeed/internal/interfaces/http/outbox"
 	interfaceshttpplayback "FluxFeed/internal/interfaces/http/playback"
 	interfaceshttprecommendation "FluxFeed/internal/interfaces/http/recommendation"
 	interfaceshttprelation "FluxFeed/internal/interfaces/http/relation"
@@ -39,6 +41,7 @@ import (
 	"context"
 	"database/sql"
 	"log"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -92,37 +95,49 @@ func Register(g *gin.Engine, cfg *infraconfig.Config, db *sql.DB) error {
 	feedService := applicationfeed.New(feedRepo, feedOptions...)
 	feedHandler := interfaceshttpfeed.New(feedService)
 	interactionRepo := infrainteraction.New(gormDB)
+	exposureRepo := infraexposure.New(gormDB)
+	relationRepo := infrarelation.New(gormDB)
 	messageRepo := inframessage.New(gormDB)
 	messageService := applicationmessage.New(messageRepo)
 	messageHandler := interfaceshttpmessage.New(messageService)
 	playbackRepo := infraplayback.New(gormDB)
 	playbackService := applicationplayback.New(playbackRepo)
 	playbackHandler := interfaceshttpplayback.New(playbackService)
+	outboxRepo := infraoutbox.New(gormDB)
+	outboxHandler := interfaceshttpoutbox.New(outboxRepo)
 	eventPublisher := newApplicationEventPublisher(cfg)
 	if eventPublisher != nil {
-		videoOptions = append(videoOptions, applicationvideo.WithPublishedEventPublisher(eventPublisher))
-		exposureOptions = append(exposureOptions, applicationexposure.WithViewEventPublisher(eventPublisher))
+		if _, kafkaEnabled := eventPublisher.(*inframq.FeedEventBus); kafkaEnabled {
+			videoRepo.EnablePublishedOutbox(outboxRepo, normalizedTopic(cfg.Kafka.VideoTopic, "fluxfeed.video"))
+			interactionRepo.EnableCommentOutbox(outboxRepo, normalizedTopic(cfg.Kafka.InteractionTopic, "fluxfeed.interaction"))
+			exposureRepo.EnableViewEventOutbox(outboxRepo, normalizedTopic(cfg.Kafka.ExposureTopic, "fluxfeed.exposure"))
+			relationRepo.EnableFollowOutbox(outboxRepo, normalizedTopic(cfg.Kafka.RelationTopic, "fluxfeed.relation"))
+		} else {
+			videoOptions = append(videoOptions, applicationvideo.WithPublishedEventPublisher(eventPublisher))
+			exposureOptions = append(exposureOptions, applicationexposure.WithViewEventPublisher(eventPublisher))
+			if publisher, ok := eventPublisher.(applicationinteraction.CommentEventPublisher); ok {
+				interactionOptions = append(interactionOptions, applicationinteraction.WithCommentEventPublisher(publisher))
+			}
+		}
 		if feedCache != nil {
 			interactionOptions = append(interactionOptions, applicationinteraction.WithAsyncActionPipeline(feedCache, eventPublisher))
-		}
-		if publisher, ok := eventPublisher.(applicationinteraction.CommentEventPublisher); ok {
-			interactionOptions = append(interactionOptions, applicationinteraction.WithCommentEventPublisher(publisher))
 		}
 	}
 	messageWriter := NewMessageWriter(messageService)
 	interactionOptions = append(interactionOptions, applicationinteraction.WithMessageWriter(messageWriter))
 	relationOptions := []applicationrelation.Option{applicationrelation.WithMessageWriter(messageWriter)}
-	if publisher, ok := eventPublisher.(applicationrelation.FollowEventPublisher); ok {
-		relationOptions = append(relationOptions, applicationrelation.WithFollowEventPublisher(publisher))
+	if _, kafkaEnabled := eventPublisher.(*inframq.FeedEventBus); !kafkaEnabled {
+		publisher, ok := eventPublisher.(applicationrelation.FollowEventPublisher)
+		if ok {
+			relationOptions = append(relationOptions, applicationrelation.WithFollowEventPublisher(publisher))
+		}
 	}
 	videoService := applicationvideo.New(videoRepo, videoOptions...)
 	videoHandler := interfaceshttpvideo.New(videoService)
 	interactionService := applicationinteraction.New(interactionRepo, interactionOptions...)
 	interactionHandler := interfaceshttpinteraction.New(interactionService)
-	exposureRepo := infraexposure.New(gormDB)
 	exposureService := applicationexposure.New(exposureRepo, exposureOptions...)
 	exposureHandler := interfaceshttpexposure.New(exposureService)
-	relationRepo := infrarelation.New(gormDB)
 	if feedCache != nil {
 		relationOptions = append(relationOptions, applicationrelation.WithFollowFeedBackfiller(NewFollowFeedBackfiller(feedRepo, feedCache)))
 	}
@@ -192,8 +207,17 @@ func Register(g *gin.Engine, cfg *infraconfig.Config, db *sql.DB) error {
 	internal.POST("/exposures", recommendationHandler.SaveExposures)
 	internal.POST("/messages", interfaceshttpmiddleware.NewInternalTokenAuth(cfg.Internal.Token), messageHandler.Create)
 	internal.POST("/playback-qos-reports", interfaceshttpmiddleware.NewInternalTokenAuth(cfg.Internal.Token), playbackHandler.CreateInternalQoSReport)
+	internal.GET("/outbox-events", interfaceshttpmiddleware.NewInternalTokenAuth(cfg.Internal.Token), outboxHandler.List)
 
 	return nil
+}
+
+func normalizedTopic(topic string, fallback string) string {
+	topic = strings.TrimSpace(topic)
+	if topic == "" {
+		return fallback
+	}
+	return topic
 }
 
 type applicationEventPublisher interface {

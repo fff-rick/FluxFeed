@@ -1,9 +1,12 @@
 package infrarelation
 
 import (
+	applicationeventbus "FluxFeed/internal/application/eventbus"
+	applicationrelation "FluxFeed/internal/application/relation"
 	domainaccount "FluxFeed/internal/domain/account"
 	domainrelation "FluxFeed/internal/domain/relation"
 	infraaccount "FluxFeed/internal/infra/persistence/account"
+	infraoutbox "FluxFeed/internal/infra/persistence/outbox"
 	"context"
 	"errors"
 	"strings"
@@ -14,7 +17,9 @@ import (
 )
 
 type Repository struct {
-	db *gorm.DB
+	db            *gorm.DB
+	outbox        *infraoutbox.Repository
+	relationTopic string
 }
 
 type relationUserModel struct {
@@ -37,6 +42,11 @@ func New(db *gorm.DB) *Repository {
 	return &Repository{db: db}
 }
 
+func (r *Repository) EnableFollowOutbox(outbox *infraoutbox.Repository, topic string) {
+	r.outbox = outbox
+	r.relationTopic = strings.TrimSpace(topic)
+}
+
 // SetFollow 设置关注或取关状态，并在同一事务中维护双方计数。
 func (r *Repository) SetFollow(ctx context.Context, userID int64, targetUserID int64, active bool, idempotencyKey string) (*domainrelation.Follow, *domainrelation.RelationStat, *domainrelation.RelationStat, error) {
 	idempotencyKey = strings.TrimSpace(idempotencyKey)
@@ -44,6 +54,7 @@ func (r *Repository) SetFollow(ctx context.Context, userID int64, targetUserID i
 	var follow FollowModel
 	var userStat RelationStatModel
 	var targetStat RelationStatModel
+	changed := false
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		if err := lockNormalUser(tx, userID); err != nil {
 			return err
@@ -79,6 +90,7 @@ func (r *Repository) SetFollow(ctx context.Context, userID int64, targetUserID i
 			if err := tx.Create(&follow).Error; err != nil {
 				return err
 			}
+			changed = true
 			if active {
 				delta = 1
 			}
@@ -108,6 +120,7 @@ func (r *Repository) SetFollow(ctx context.Context, userID int64, targetUserID i
 				if err := tx.Save(&follow).Error; err != nil {
 					return err
 				}
+				changed = true
 			}
 		}
 
@@ -118,15 +131,34 @@ func (r *Repository) SetFollow(ctx context.Context, userID int64, targetUserID i
 				return err
 			}
 			targetStat, err = updateStat(tx, targetUserID, 0, delta)
-			return err
+			if err != nil {
+				return err
+			}
+		} else {
+			userStat, err = currentStat(tx, userID)
+			if err != nil {
+				return err
+			}
+			targetStat, err = currentStat(tx, targetUserID)
+			if err != nil {
+				return err
+			}
 		}
-
-		userStat, err = currentStat(tx, userID)
-		if err != nil {
-			return err
+		if r.outbox != nil && changed {
+			source := applicationrelation.NewFollowChangedEvent(restoreFollow(follow))
+			eventType := applicationeventbus.TypeUserUnfollowed
+			if source.Active {
+				eventType = applicationeventbus.TypeUserFollowed
+			}
+			event, err := applicationeventbus.New(source.EventID, eventType, source.UserID, 0, source.OccurredAt, source)
+			if err != nil {
+				return err
+			}
+			if err := r.outbox.Add(tx, r.relationTopic, event); err != nil {
+				return err
+			}
 		}
-		targetStat, err = currentStat(tx, targetUserID)
-		return err
+		return nil
 	})
 	if err != nil {
 		return nil, nil, nil, mapUserError(err)
