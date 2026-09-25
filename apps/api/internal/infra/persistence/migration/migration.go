@@ -8,6 +8,7 @@ import (
 	infrainteraction "FluxFeed/internal/infra/persistence/interaction"
 	inframessage "FluxFeed/internal/infra/persistence/message"
 	infraplayback "FluxFeed/internal/infra/persistence/playback"
+	infrarecommendation "FluxFeed/internal/infra/persistence/recommendation"
 	infrarelation "FluxFeed/internal/infra/persistence/relation"
 	infravideo "FluxFeed/internal/infra/persistence/video"
 	"errors"
@@ -33,6 +34,7 @@ func autoMigrateModels(db *gorm.DB) error {
 		err = db.AutoMigrate(
 			&infraaccount.UserModel{},
 			&infraembedding.VideoEmbeddingModel{},
+			&infrarecommendation.UserInterestModel{},
 			&infravideo.VideoModel{},
 			&infravideo.VideoStatModel{},
 			&infrafeed.InboxModel{},

@@ -79,6 +79,15 @@ var (
 		[]string{"area", "result"},
 	)
 
+	EventBusEventsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "gcfeed",
+			Name:      "event_bus_events_total",
+			Help:      "Event bus operations by backend, event type and result.",
+		},
+		[]string{"backend", "event_type", "operation", "result"},
+	)
+
 	VideoUploadTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: "gcfeed",
@@ -137,6 +146,7 @@ func init() {
 		FeedItemsTotal,
 		FeedCacheRequestsTotal,
 		FeedCacheWritesTotal,
+		EventBusEventsTotal,
 		VideoUploadTotal,
 		VideoUploadDuration,
 		VideoProcessingDuration,
@@ -218,6 +228,15 @@ func ObserveCacheWrite(area string, count int, err error) {
 		count = 1
 	}
 	FeedCacheWritesTotal.WithLabelValues(area, resultLabel(err)).Add(float64(count))
+}
+
+func ObserveEventBus(backend string, eventType string, operation string, err error) {
+	EventBusEventsTotal.WithLabelValues(
+		normalizeLabel(backend, "unknown"),
+		normalizeLabel(eventType, "unknown"),
+		normalizeLabel(operation, "unknown"),
+		resultLabel(err),
+	).Inc()
 }
 
 func ObserveUpload(kind string, duration time.Duration, err error) {

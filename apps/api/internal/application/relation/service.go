@@ -23,9 +23,10 @@ var ErrBackfillFollowFeedFailed = errors.New("failed to backfill follow feed")
 
 // Service 编排用户关系用例：关注、取关、关注列表和粉丝列表。
 type Service struct {
-	repo          domainrelation.Repository
-	backfiller    FollowFeedBackfiller
-	messageWriter MessageWriter
+	repo           domainrelation.Repository
+	backfiller     FollowFeedBackfiller
+	messageWriter  MessageWriter
+	eventPublisher FollowEventPublisher
 }
 
 type FollowFeedBackfiller interface {
@@ -45,6 +46,10 @@ type MessageWriter interface {
 // ActorMessageWriter 可在关注消息里携带触发用户资料。
 type ActorMessageWriter interface {
 	CreateFromActorEvent(ctx context.Context, userID int64, messageType string, title string, content string, eventID string, idempotencyKey string, actorID int64, actorNickname string, actorAvatarURL string) (any, error)
+}
+
+type FollowEventPublisher interface {
+	PublishFollowChanged(ctx context.Context, event *FollowChangedEvent) error
 }
 
 // FollowResult 是关注或取关后的关系状态和计数。
@@ -89,6 +94,12 @@ func WithFollowFeedBackfiller(backfiller FollowFeedBackfiller) Option {
 func WithMessageWriter(writer MessageWriter) Option {
 	return func(s *Service) {
 		s.messageWriter = writer
+	}
+}
+
+func WithFollowEventPublisher(publisher FollowEventPublisher) Option {
+	return func(s *Service) {
+		s.eventPublisher = publisher
 	}
 }
 
@@ -161,6 +172,9 @@ func (s *Service) setFollow(ctx context.Context, userID int64, targetUserID int6
 			return nil, ErrBackfillFollowFeedFailed
 		}
 		s.notifyFollow(ctx, userID, targetUserID)
+	}
+	if s.eventPublisher != nil {
+		_ = s.eventPublisher.PublishFollowChanged(ctx, NewFollowChangedEvent(follow))
 	}
 
 	return &FollowResult{

@@ -29,6 +29,7 @@ type Service struct {
 	statCache        StatCache
 	actionStateStore ActionStateStore
 	actionPublisher  ActionEventPublisher
+	commentPublisher CommentEventPublisher
 	messageWriter    MessageWriter
 }
 
@@ -62,6 +63,10 @@ type ActionStateStore interface {
 // ActionEventPublisher 投递点赞收藏变更事件。
 type ActionEventPublisher interface {
 	PublishActionChanged(ctx context.Context, event *ActionChangedEvent) error
+}
+
+type CommentEventPublisher interface {
+	PublishVideoCommented(ctx context.Context, event *CommentedEvent) error
 }
 
 // MessageWriter 写入互动触发的站内消息。
@@ -144,6 +149,12 @@ func WithAsyncActionPipeline(store ActionStateStore, publisher ActionEventPublis
 	}
 }
 
+func WithCommentEventPublisher(publisher CommentEventPublisher) Option {
+	return func(s *Service) {
+		s.commentPublisher = publisher
+	}
+}
+
 // WithMessageWriter 为点赞和评论成功后的通知写入启用消息中心。
 func WithMessageWriter(writer MessageWriter) Option {
 	return func(s *Service) {
@@ -205,6 +216,9 @@ func (s *Service) CreateComment(ctx context.Context, userID int64, videoID int64
 	s.syncCommentCount(ctx, created.VideoID, count)
 	if delta > 0 {
 		s.notifyComment(ctx, created)
+		if s.commentPublisher != nil {
+			_ = s.commentPublisher.PublishVideoCommented(ctx, NewCommentedEvent(created, count))
+		}
 	}
 
 	return &CreateCommentResult{Comment: created, CommentCount: count}, nil

@@ -237,6 +237,20 @@ Cache Fill
 
 ## Stage 5：Kafka Event Bus
 
+**状态：已完成。** 已建立统一 `Event` 信封与通用 EventBus 接口，引入
+Kafka 实现并迁移 `VideoPublished`、点赞/收藏变更、评论、关注/取关、曝光/观看事件。视频发布
+使用独立 Fanout／Embedding 消费组，互动事件由 Counter Consumer 落库；API
+与 Worker 优先连接 Kafka，不可用时回退现有 RabbitMQ。已增加事件总线
+Prometheus 指标和单节点 KRaft Compose 环境。Feature Consumer 已基于观看流水物化
+用户兴趣向量，Recommendation Consumer 通过独立消费组补偿 Seen Bloom 标记；
+Outbox、幂等、退避与 DLQ 属于 Stage 6。
+
+Kafka 协议回环测试默认跳过；启动 Compose 后可执行：
+
+``` bash
+cd apps/api && KAFKA_BROKERS=localhost:9092 go test ./internal/infra/mq -run TestKafkaVideoEventFanout -count=1 -v
+```
+
 ### 目标
 
 将 Feed 的核心异步业务统一为事件驱动架构。

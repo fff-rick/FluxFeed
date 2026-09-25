@@ -18,6 +18,19 @@ redis:
   password: ""
   db: 0
 
+kafka:
+  brokers: ["localhost:9092"]
+  client_id: "fluxfeed-api"
+  video_topic: "fluxfeed.video"
+  interaction_topic: "fluxfeed.interaction"
+  exposure_topic: "fluxfeed.exposure"
+  relation_topic: "fluxfeed.relation"
+  fanout_group: "fluxfeed-fanout"
+  embedding_group: "fluxfeed-embedding"
+  counter_group: "fluxfeed-counter"
+  feature_group: "fluxfeed-feature"
+  recommendation_group: "fluxfeed-recommendation"
+
 rabbitmq:
   url: "amqp://guest:guest@localhost:5672/"
   interaction_exchange: "fluxfeed.interaction"
