@@ -1,9 +1,12 @@
 package infrainteraction
 
 import (
+	applicationeventbus "FluxFeed/internal/application/eventbus"
+	applicationinteraction "FluxFeed/internal/application/interaction"
 	domainaccount "FluxFeed/internal/domain/account"
 	domaininteraction "FluxFeed/internal/domain/interaction"
 	domainvideo "FluxFeed/internal/domain/video"
+	infraoutbox "FluxFeed/internal/infra/persistence/outbox"
 	infravideo "FluxFeed/internal/infra/persistence/video"
 	"context"
 	"errors"
@@ -16,7 +19,9 @@ import (
 )
 
 type Repository struct {
-	db *gorm.DB
+	db           *gorm.DB
+	outbox       *infraoutbox.Repository
+	commentTopic string
 }
 
 type commentWithUserModel struct {
@@ -40,6 +45,11 @@ type userProfileModel struct {
 
 func New(db *gorm.DB) *Repository {
 	return &Repository{db: db}
+}
+
+func (r *Repository) EnableCommentOutbox(outbox *infraoutbox.Repository, topic string) {
+	r.outbox = outbox
+	r.commentTopic = strings.TrimSpace(topic)
 }
 
 // GetVideoStat 读取公开视频当前互动计数。
@@ -225,6 +235,17 @@ func (r *Repository) CreateComment(ctx context.Context, comment *domaininteracti
 			return err
 		}
 		count = nextCount
+		if r.outbox != nil {
+			created := domaininteraction.RestoreComment(model.ID, model.VideoID, model.UserID, "", "", model.Content, model.Status, idempotencyKeyValue(model.IdempotencyKey), model.CreatedAt, model.UpdatedAt)
+			source := applicationinteraction.NewCommentedEvent(created, count)
+			event, err := applicationeventbus.New(source.EventID, applicationeventbus.TypeVideoCommented, source.UserID, source.VideoID, source.OccurredAt, source)
+			if err != nil {
+				return err
+			}
+			if err := r.outbox.Add(tx, r.commentTopic, event); err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 	if err != nil {

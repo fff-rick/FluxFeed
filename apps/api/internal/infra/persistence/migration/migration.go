@@ -3,10 +3,12 @@ package migration
 import (
 	infraaccount "FluxFeed/internal/infra/persistence/account"
 	infraembedding "FluxFeed/internal/infra/persistence/embedding"
+	infraeventbus "FluxFeed/internal/infra/persistence/eventbus"
 	infraexposure "FluxFeed/internal/infra/persistence/exposure"
 	infrafeed "FluxFeed/internal/infra/persistence/feed"
 	infrainteraction "FluxFeed/internal/infra/persistence/interaction"
 	inframessage "FluxFeed/internal/infra/persistence/message"
+	infraoutbox "FluxFeed/internal/infra/persistence/outbox"
 	infraplayback "FluxFeed/internal/infra/persistence/playback"
 	infrarecommendation "FluxFeed/internal/infra/persistence/recommendation"
 	infrarelation "FluxFeed/internal/infra/persistence/relation"
@@ -34,6 +36,7 @@ func autoMigrateModels(db *gorm.DB) error {
 		err = db.AutoMigrate(
 			&infraaccount.UserModel{},
 			&infraembedding.VideoEmbeddingModel{},
+			&infraeventbus.ConsumerEventModel{},
 			&infrarecommendation.UserInterestModel{},
 			&infravideo.VideoModel{},
 			&infravideo.VideoStatModel{},
@@ -43,6 +46,7 @@ func autoMigrateModels(db *gorm.DB) error {
 			&infrainteraction.ActionModel{},
 			&infrainteraction.CommentModel{},
 			&inframessage.MessageModel{},
+			&infraoutbox.EventModel{},
 			&infraplayback.ConfigModel{},
 			&infraplayback.QoSLogModel{},
 			&infrarelation.FollowModel{},

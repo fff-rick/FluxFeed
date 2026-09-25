@@ -299,6 +299,15 @@ Kafka
 
 ## Stage 6：可靠消息与最终一致性
 
+**状态：已完成。** 已完成视频发布 Transactional Outbox：视频、初始统计和
+`VideoPublished` 事件同事务写入 MySQL，由 Worker 轮询发布并记录成功／失败状态。
+第二批已将评论、关注／取关和曝光／观看事件纳入各自业务事务的 Outbox；点赞和收藏
+保留 Redis 快速写与 Kafka 直发，发布失败时同步回落 MySQL。Kafka 消费端已增加按
+消费组和事件 ID 的持久化幂等、有限次数指数退避、`<原 Topic>.dlq` 死信投递，
+以及重试、DLQ 和处理耗时指标。Outbox 待发布量、失败量和最老积压时长通过
+Prometheus 暴露；失败或待处理记录可通过受内部 Token 保护的
+`GET /internal/outbox-events?status=failed|pending&limit=50` 查询。
+
 ### 目标
 
 解决 Feed 异步链路中的数据一致性问题。

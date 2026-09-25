@@ -30,6 +30,8 @@ kafka:
   counter_group: "fluxfeed-counter"
   feature_group: "fluxfeed-feature"
   recommendation_group: "fluxfeed-recommendation"
+  consumer_max_retries: 5
+  consumer_retry_backoff: "200ms"
 
 rabbitmq:
   url: "amqp://guest:guest@rabbitmq:5672/"

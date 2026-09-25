@@ -1,9 +1,13 @@
 package infravideo
 
 import (
+	applicationeventbus "FluxFeed/internal/application/eventbus"
+	applicationvideo "FluxFeed/internal/application/video"
 	domainvideo "FluxFeed/internal/domain/video"
+	infraoutbox "FluxFeed/internal/infra/persistence/outbox"
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/go-sql-driver/mysql"
@@ -11,7 +15,9 @@ import (
 )
 
 type Repository struct {
-	db *gorm.DB
+	db         *gorm.DB
+	outbox     *infraoutbox.Repository
+	videoTopic string
 }
 
 // videoWithStatModel 承接 video 与 video_stat 联表查询结果。
@@ -35,6 +41,12 @@ type videoWithStatModel struct {
 // New 创建视频仓储实现。
 func New(db *gorm.DB) *Repository {
 	return &Repository{db: db}
+}
+
+// EnablePublishedOutbox 让视频和发布事件在同一个数据库事务中落盘。
+func (r *Repository) EnablePublishedOutbox(outbox *infraoutbox.Repository, topic string) {
+	r.outbox = outbox
+	r.videoTopic = strings.TrimSpace(topic)
 }
 
 // EnsureStats 确保每个视频都有一条统计记录。
@@ -80,6 +92,22 @@ func (r *Repository) Save(ctx context.Context, video *domainvideo.Video) error {
 		if err := tx.Create(&stat).Error; err != nil {
 			return err
 		}
+		video.ID = model.ID
+		video.CreatedAt = model.CreatedAt
+		video.UpdatedAt = model.UpdatedAt
+		if r.outbox != nil {
+			source := applicationvideo.NewPublishedEvent(video)
+			if source == nil {
+				return applicationeventbus.ErrInvalidEvent
+			}
+			event, err := applicationeventbus.New(source.EventID, applicationeventbus.TypeVideoPublished, source.AuthorID, source.VideoID, source.OccurredAt, source)
+			if err != nil {
+				return err
+			}
+			if err := r.outbox.Add(tx, r.videoTopic, event); err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 	if err != nil {
@@ -87,9 +115,6 @@ func (r *Repository) Save(ctx context.Context, video *domainvideo.Video) error {
 	}
 
 	// 写回数据库生成的 ID 和时间字段，保证返回响应包含完整信息。
-	video.ID = model.ID
-	video.CreatedAt = model.CreatedAt
-	video.UpdatedAt = model.UpdatedAt
 	return nil
 }
 

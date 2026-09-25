@@ -24,6 +24,14 @@ func NewFeedEventBus(bus applicationeventbus.Bus, cfg infraconfig.KafkaConfig) *
 
 func (b *FeedEventBus) Close() error { return b.bus.Close() }
 
+func (b *FeedEventBus) Publish(ctx context.Context, topic string, event *applicationeventbus.Event) error {
+	return b.bus.Publish(ctx, topic, event)
+}
+
+func (b *FeedEventBus) Subscribe(ctx context.Context, topic string, group string, handler func(context.Context, *applicationeventbus.Event) error) error {
+	return b.bus.Subscribe(ctx, topic, group, handler)
+}
+
 func (b *FeedEventBus) PublishVideoPublished(ctx context.Context, source *applicationvideo.PublishedEvent) error {
 	if source == nil {
 		return nil
