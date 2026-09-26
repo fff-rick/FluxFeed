@@ -439,6 +439,13 @@ Feed 20
 
 ## Stage 8：曝光与反馈闭环
 
+**状态：已完成。** 第一批已补齐 `Exposure / Click / Play / Valid Play / Finish`
+行为语义（保留旧 `complete` 兼容），以 Feed `request_id` 对行为上报和曝光聚合做幂等去重；
+正向行为按强度实时刷新用户兴趣画像。`skip` 作为首个推荐负反馈，会立即写入 Seen Filter、
+在 30 天窗口内排除对应视频，并在重算画像时移除该视频的观看信号。第二批增加显式
+`not_interested` 与 `hide_author` 反馈：Web Feed 可即时移除单条内容或对应作者内容，
+召回、相似种子和画像重算均应用 30 天负反馈窗口，形成可运行的实时反馈闭环。
+
 ### 目标
 
 让用户行为真正影响下一次 Feed。

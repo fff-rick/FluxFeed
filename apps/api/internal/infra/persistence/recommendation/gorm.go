@@ -18,7 +18,15 @@ import (
 )
 
 const hotScoreExpression = "COALESCE(vs.like_count, 0) * 3 + COALESCE(vs.comment_count, 0) * 5 + COALESCE(vs.favorite_count, 0) * 4"
+const feedbackFilter = `NOT EXISTS (
+	SELECT 1 FROM video_view_events AS negative
+	JOIN video AS negative_video ON negative_video.id = negative.video_id
+	WHERE negative.user_id = ? AND negative.created_at >= ?
+	  AND ((negative.video_id = v.id AND negative.event_type IN ?)
+	    OR (negative.event_type = ? AND negative_video.author_id = v.author_id))
+)`
 const positiveEventWindow = 30 * 24 * time.Hour
+const negativeFeedbackWindow = 30 * 24 * time.Hour
 const profileSignalLimit = 200
 
 type Repository struct {
@@ -56,7 +64,14 @@ func (r *Repository) ListCandidatesBySource(ctx context.Context, userID int64, s
 			userID,
 			time.Now().Add(-domainrecommendation.RecentExposureWindow),
 		).
-		Where("v.status = ? AND v.published_at IS NOT NULL AND e.video_id IS NULL", domainvideo.StatusPublished)
+		Where("v.status = ? AND v.published_at IS NOT NULL AND e.video_id IS NULL", domainvideo.StatusPublished).
+		Where(`NOT EXISTS (
+			SELECT 1 FROM video_view_events AS negative
+			JOIN video AS negative_video ON negative_video.id = negative.video_id
+			WHERE negative.user_id = ? AND negative.created_at >= ?
+			  AND ((negative.video_id = v.id AND negative.event_type IN ?)
+			    OR (negative.event_type = ? AND negative_video.author_id = v.author_id))
+		)`, userID, time.Now().Add(-negativeFeedbackWindow), videoNegativeEventTypes(), domainexposure.EventTypeHideAuthor)
 	switch source {
 	case domainrecommendation.RecallSourceHot:
 		query = query.Order("hot_score DESC").Order("v.published_at DESC")
@@ -76,16 +91,16 @@ func (r *Repository) ListCandidatesBySource(ctx context.Context, userID int64, s
 			FROM video_view_events AS mine
 			JOIN video_view_events AS peer
 			  ON peer.video_id = mine.video_id AND peer.user_id <> mine.user_id
-			  AND peer.created_at >= ? AND peer.event_type IN (?, ?)
+			  AND peer.created_at >= ? AND peer.event_type IN ?
 			JOIN video_view_events AS candidate
 			  ON candidate.user_id = peer.user_id AND candidate.video_id <> mine.video_id
-			  AND candidate.created_at >= ? AND candidate.event_type IN (?, ?)
-			WHERE mine.user_id = ? AND mine.created_at >= ? AND mine.event_type IN (?, ?)
+			  AND candidate.created_at >= ? AND candidate.event_type IN ?
+			WHERE mine.user_id = ? AND mine.created_at >= ? AND mine.event_type IN ?
 			GROUP BY candidate.video_id
 		) AS collaborative ON collaborative.video_id = v.id`,
-			time.Now().Add(-positiveEventWindow), domainexposure.EventTypePlay, domainexposure.EventTypeComplete,
-			time.Now().Add(-positiveEventWindow), domainexposure.EventTypePlay, domainexposure.EventTypeComplete,
-			userID, time.Now().Add(-positiveEventWindow), domainexposure.EventTypePlay, domainexposure.EventTypeComplete,
+			time.Now().Add(-positiveEventWindow), collaborativeEventTypes(),
+			time.Now().Add(-positiveEventWindow), collaborativeEventTypes(),
+			userID, time.Now().Add(-positiveEventWindow), collaborativeEventTypes(),
 		).Where("NOT EXISTS (SELECT 1 FROM video_view_events own WHERE own.user_id = ? AND own.video_id = v.id)", userID).
 			Order("collaborative.affinity DESC").Order("v.published_at DESC")
 	default:
@@ -117,9 +132,17 @@ func (r *Repository) ListRecentPositiveVideoIDs(ctx context.Context, userID int6
 		return []int64{}, nil
 	}
 	var rows []struct{ VideoID int64 }
-	err := r.db.WithContext(ctx).Table("video_view_events").Select("video_id").
-		Where("user_id = ? AND created_at >= ? AND event_type IN ?", userID, time.Now().Add(-positiveEventWindow), positiveEventTypes()).
-		Group("video_id").Order("MAX(created_at) DESC").Limit(limit).Scan(&rows).Error
+	err := r.db.WithContext(ctx).Table("video_view_events").Select("video_view_events.video_id").
+		Joins("JOIN video AS watched ON watched.id = video_view_events.video_id").
+		Where("video_view_events.user_id = ? AND video_view_events.created_at >= ? AND video_view_events.event_type IN ?", userID, time.Now().Add(-positiveEventWindow), positiveEventTypes()).
+		Where(`NOT EXISTS (
+			SELECT 1 FROM video_view_events AS negative
+			JOIN video AS negative_video ON negative_video.id = negative.video_id
+			WHERE negative.user_id = video_view_events.user_id AND negative.created_at >= ?
+			  AND ((negative.video_id = video_view_events.video_id AND negative.event_type IN ?)
+			    OR (negative.event_type = ? AND negative_video.author_id = watched.author_id))
+		)`, time.Now().Add(-negativeFeedbackWindow), videoNegativeEventTypes(), domainexposure.EventTypeHideAuthor).
+		Group("video_view_events.video_id").Order("MAX(video_view_events.created_at) DESC").Limit(limit).Scan(&rows).Error
 	videoIDs := make([]int64, 0, len(rows))
 	for _, row := range rows {
 		videoIDs = append(videoIDs, row.VideoID)
@@ -171,7 +194,15 @@ func (r *Repository) calculateUserInterestVector(ctx context.Context, userID int
 		Table("video_view_events AS ev").
 		Select("ve.embedding_json, ev.event_type, ev.watch_ms, ev.completed").
 		Joins("JOIN video_embedding AS ve ON ve.video_id = ev.video_id AND ve.model = ?", domainembedding.HashNgramModel).
+		Joins("JOIN video AS watched ON watched.id = ev.video_id").
 		Where("ev.user_id = ? AND ev.created_at >= ? AND ev.event_type IN ?", userID, time.Now().Add(-positiveEventWindow), positiveEventTypes()).
+		Where(`NOT EXISTS (
+			SELECT 1 FROM video_view_events AS negative
+			JOIN video AS negative_video ON negative_video.id = negative.video_id
+			WHERE negative.user_id = ev.user_id AND negative.created_at >= ?
+			  AND ((negative.video_id = ev.video_id AND negative.event_type IN ?)
+			    OR (negative.event_type = ? AND negative_video.author_id = watched.author_id))
+		)`, time.Now().Add(-negativeFeedbackWindow), videoNegativeEventTypes(), domainexposure.EventTypeHideAuthor).
 		Order("ev.created_at DESC").
 		Limit(profileSignalLimit).
 		Rows()
@@ -196,8 +227,10 @@ func (r *Repository) calculateUserInterestVector(ctx context.Context, userID int
 
 	actionRows, err := r.db.WithContext(ctx).Table("interaction_action AS ia").
 		Select("ve.embedding_json, ia.action_type").
+		Joins("JOIN video AS v ON v.id = ia.video_id").
 		Joins("JOIN video_embedding AS ve ON ve.video_id = ia.video_id AND ve.model = ?", domainembedding.HashNgramModel).
 		Where("ia.user_id = ? AND ia.status = ? AND ia.updated_at >= ?", userID, domaininteraction.ActionStatusActive, time.Now().Add(-positiveEventWindow)).
+		Where(feedbackFilter, userID, time.Now().Add(-negativeFeedbackWindow), videoNegativeEventTypes(), domainexposure.EventTypeHideAuthor).
 		Order("ia.updated_at DESC").Limit(profileSignalLimit).Rows()
 	if err != nil {
 		return nil, false, err
@@ -222,8 +255,10 @@ func (r *Repository) calculateUserInterestVector(ctx context.Context, userID int
 
 	commentRows, err := r.db.WithContext(ctx).Table("interaction_comment AS c").
 		Select("ve.embedding_json").
+		Joins("JOIN video AS v ON v.id = c.video_id").
 		Joins("JOIN video_embedding AS ve ON ve.video_id = c.video_id AND ve.model = ?", domainembedding.HashNgramModel).
 		Where("c.user_id = ? AND c.status = ? AND c.created_at >= ?", userID, domaininteraction.CommentStatusNormal, time.Now().Add(-positiveEventWindow)).
+		Where(feedbackFilter, userID, time.Now().Add(-negativeFeedbackWindow), videoNegativeEventTypes(), domainexposure.EventTypeHideAuthor).
 		Order("c.created_at DESC").Limit(profileSignalLimit).Rows()
 	if err != nil {
 		return nil, false, err
@@ -247,6 +282,7 @@ func (r *Repository) calculateUserInterestVector(ctx context.Context, userID int
 		Joins("JOIN video AS v ON v.author_id = f.target_user_id AND v.status = ? AND v.published_at >= ?", domainvideo.StatusPublished, time.Now().Add(-positiveEventWindow)).
 		Joins("JOIN video_embedding AS ve ON ve.video_id = v.id AND ve.model = ?", domainembedding.HashNgramModel).
 		Where("f.user_id = ? AND f.status = ?", userID, domainrelation.FollowStatusActive).
+		Where(feedbackFilter, userID, time.Now().Add(-negativeFeedbackWindow), videoNegativeEventTypes(), domainexposure.EventTypeHideAuthor).
 		Order("v.published_at DESC").Limit(20).Rows()
 	if err != nil {
 		return nil, false, err
@@ -373,8 +409,20 @@ func (r *Repository) SaveExposures(ctx context.Context, writes []*domainrecommen
 				WatchMs:   0,
 				Completed: false,
 			}
-			if err := tx.Create(&event).Error; err != nil {
-				return err
+			result := tx.Clauses(clause.OnConflict{
+				Columns:   []clause.Column{{Name: "user_id"}, {Name: "video_id"}, {Name: "request_id"}, {Name: "event_type"}},
+				DoNothing: true,
+			}).Create(&event)
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected == 0 {
+				var saved infraexposure.ExposureModel
+				if err := tx.Where("user_id = ? AND video_id = ?", write.UserID, write.VideoID).Take(&saved).Error; err != nil {
+					return err
+				}
+				exposures = append(exposures, restoreExposure(saved))
+				continue
 			}
 			model := infraexposure.ExposureModel{
 				UserID:         write.UserID,
@@ -423,24 +471,46 @@ func decodeVector(content string) ([]float64, error) {
 
 func positiveEventTypes() []string {
 	return []string{
+		domainexposure.EventTypeClick,
 		domainexposure.EventTypePlay,
+		domainexposure.EventTypeValidPlay,
+		domainexposure.EventTypeFinish,
 		domainexposure.EventTypeComplete,
+	}
+}
+
+func collaborativeEventTypes() []string {
+	return []string{
+		domainexposure.EventTypePlay,
+		domainexposure.EventTypeValidPlay,
+		domainexposure.EventTypeFinish,
+		domainexposure.EventTypeComplete,
+	}
+}
+
+func videoNegativeEventTypes() []string {
+	return []string{
+		domainexposure.EventTypeSkip,
+		domainexposure.EventTypeNotInterested,
 	}
 }
 
 func eventWeight(eventType string, watchMs int, completed bool) float64 {
 	switch eventType {
-	case domainexposure.EventTypeComplete:
+	case domainexposure.EventTypeFinish, domainexposure.EventTypeComplete:
 		return 3
+	case domainexposure.EventTypeValidPlay:
+		weight := 1.5 + float64(watchMs)/60000
+		return min(weight, 2.5)
 	case domainexposure.EventTypePlay:
-		weight := 1 + float64(watchMs)/30000
-		if weight > 2 {
-			weight = 2
-		}
+		weight := 0.5 + float64(watchMs)/60000
+		weight = min(weight, 1.5)
 		if completed {
 			weight += 1
 		}
 		return weight
+	case domainexposure.EventTypeClick:
+		return 0.25
 	default:
 		return 1
 	}

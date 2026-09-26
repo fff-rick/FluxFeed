@@ -38,7 +38,7 @@ func (w *UserFeatureWorker) HandleViewEventRecorded(ctx context.Context, event *
 	if w == nil || w.refresher == nil || event == nil || event.UserID <= 0 {
 		return nil
 	}
-	if event.EventType != domainexposure.EventTypePlay && event.EventType != domainexposure.EventTypeComplete {
+	if !domainexposure.AffectsInterestProfile(event.EventType) {
 		return nil
 	}
 	return w.refresher.RefreshUserInterestVector(ctx, event.UserID)

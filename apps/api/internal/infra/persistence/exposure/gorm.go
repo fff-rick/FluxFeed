@@ -49,8 +49,26 @@ func (r *Repository) SaveViewEvent(ctx context.Context, event *domainexposure.Vi
 			WatchMs:   event.WatchMs,
 			Completed: event.Completed,
 		}
-		if err := tx.Create(&eventModel).Error; err != nil {
-			return err
+		result := tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "user_id"}, {Name: "video_id"}, {Name: "request_id"}, {Name: "event_type"}},
+			DoNothing: true,
+		}).Create(&eventModel)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			if err := tx.Where("user_id = ? AND video_id = ? AND request_id = ? AND event_type = ?", event.UserID, event.VideoID, event.RequestID, event.EventType).
+				Take(&eventModel).Error; err != nil {
+				return err
+			}
+			if event.CountsAsExposure() {
+				return tx.Where("user_id = ? AND video_id = ?", event.UserID, event.VideoID).Take(&exposureModel).Error
+			}
+			return nil
+		}
+
+		if eventModel.ID == 0 {
+			return errors.New("view event was not persisted")
 		}
 
 		if event.CountsAsExposure() {

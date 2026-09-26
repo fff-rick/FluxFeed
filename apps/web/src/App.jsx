@@ -665,6 +665,27 @@ function FeedPage({ feedScene, session, onNavigate }) {
     setItems((state) => state.map((item) => (item.video_id === videoID ? { ...item, ...patch } : item)));
   }, []);
 
+  const reportViewEvent = useCallback((item, eventType, watchMs = 0, completed = false) => {
+    if (!session.token || !item?.video_id) return;
+    apiRequest("/api/video-view-events", {
+      method: "POST",
+      token: session.token,
+      body: {
+        video_id: item.video_id,
+        scene: item.feed_scene || feedScene,
+        request_id: item.request_id || feedRequestIDRef.current,
+        event_type: eventType,
+        watch_ms: Math.max(0, Math.round(watchMs)),
+        completed
+      }
+    }).catch((error) => {
+      if (error.status === 401 && requiresAuthFeed(feedScene)) {
+        session.clearAuth();
+        onNavigate("/auth");
+      }
+    });
+  }, [feedScene, onNavigate, session.clearAuth, session.token]);
+
   useEffect(() => {
     if (!current || feedState !== "ready" || !session.token) return;
     const scene = current.feed_scene || feedScene;
@@ -1033,6 +1054,14 @@ function FeedPage({ feedScene, session, onNavigate }) {
     moveTo(Math.max(0, index - 1));
   }
 
+  function rejectCurrent(eventType) {
+    if (!current || swipe || !session.token) return;
+    setCommentsOpen(false);
+    setItems((state) => state.filter((item) => (
+      eventType === "hide_author" ? item.author_id !== current.author_id : item.video_id !== current.video_id
+    )));
+  }
+
   function handleWheel(event) {
     if (Math.abs(event.deltaY) < 32 || wheelLocked.current || swipe || items.length < 2) return;
     wheelLocked.current = true;
@@ -1057,7 +1086,7 @@ function FeedPage({ feedScene, session, onNavigate }) {
         onPointerUp={handlePointerEnd}
         onPointerCancel={handlePointerEnd}
       >
-        {feedState === "ready" && items.length > 0 ? (
+        {feedScene === "timeline" && feedState === "ready" && items.length > 0 ? (
           <DriftWall
             items={items}
             title={currentFeedScene.label === "最新" ? "最新视频" : currentFeedScene.label}
@@ -1093,6 +1122,9 @@ function FeedPage({ feedScene, session, onNavigate }) {
                     onFavorite={setFavorite}
                     onFollow={setFollow}
                     onPlaybackQoS={reportPlaybackQoS}
+                    onViewEvent={reportViewEvent}
+                    onNotInterested={() => rejectCurrent("not_interested")}
+                    onHideAuthor={() => rejectCurrent("hide_author")}
                     onOpenAuthor={(author) => openPublicProfile(author, onNavigate)}
                     followError={followError}
                   />
@@ -1112,6 +1144,9 @@ function FeedPage({ feedScene, session, onNavigate }) {
                   onFavorite={setFavorite}
                   onFollow={setFollow}
                   onPlaybackQoS={reportPlaybackQoS}
+                  onViewEvent={reportViewEvent}
+                  onNotInterested={() => rejectCurrent("not_interested")}
+                  onHideAuthor={() => rejectCurrent("hide_author")}
                   onOpenAuthor={(author) => openPublicProfile(author, onNavigate)}
                   followError={followError}
                 />
@@ -1131,6 +1166,9 @@ function FeedPage({ feedScene, session, onNavigate }) {
                     onFavorite={setFavorite}
                     onFollow={setFollow}
                     onPlaybackQoS={reportPlaybackQoS}
+                    onViewEvent={reportViewEvent}
+                    onNotInterested={() => rejectCurrent("not_interested")}
+                    onHideAuthor={() => rejectCurrent("hide_author")}
                     onOpenAuthor={(author) => openPublicProfile(author, onNavigate)}
                     followError={followError}
                   />
@@ -1188,6 +1226,9 @@ function VideoStage({
   onFavorite,
   onFollow,
   onPlaybackQoS,
+  onViewEvent,
+  onNotInterested,
+  onHideAuthor,
   onOpenAuthor
 }) {
   const cover = item.cover_url || image.stage;
@@ -1196,6 +1237,7 @@ function VideoStage({
   const videoRef = useRef(null);
   const itemRef = useRef(item);
   const qosRef = useRef(createVideoQoSState(item.video_id));
+  const behaviorRef = useRef(createVideoBehaviorState(item.video_id));
 
   useEffect(() => {
     itemRef.current = item;
@@ -1218,6 +1260,20 @@ function VideoStage({
     };
   }, [onPlaybackQoS]);
 
+  const emitBehavior = useCallback((eventType, watchMs = 0, completed = false) => {
+    const state = behaviorRef.current;
+    if (!state || state.sent.has(eventType)) return;
+    state.sent.add(eventType);
+    onViewEvent?.(itemRef.current, eventType, watchMs, completed);
+  }, [onViewEvent]);
+
+  const flushBehavior = useCallback(() => {
+    const state = behaviorRef.current;
+    if (!state?.startedAt || state.sent.has("valid_play") || state.sent.has("finish") ||
+      state.sent.has("not_interested") || state.sent.has("hide_author")) return;
+    emitBehavior("skip", performance.now() - state.startedAt, false);
+  }, [emitBehavior]);
+
   useEffect(() => {
     qosRef.current = createVideoQoSState(item.video_id);
     if (active && showVideo) {
@@ -1227,6 +1283,11 @@ function VideoStage({
       flushQoS();
     };
   }, [active, flushQoS, item.video_id, showVideo]);
+
+  useEffect(() => {
+    behaviorRef.current = createVideoBehaviorState(item.video_id);
+    return flushBehavior;
+  }, [flushBehavior, item.video_id]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -1257,6 +1318,23 @@ function VideoStage({
     if (!state.playingStartedAt) {
       state.playingStartedAt = performance.now();
     }
+    if (!behaviorRef.current.startedAt) {
+      behaviorRef.current.startedAt = performance.now();
+    }
+    emitBehavior("play");
+  }
+
+  function handleTimeUpdate() {
+    const video = videoRef.current;
+    const state = behaviorRef.current;
+    if (!active || !video || !state?.startedAt) return;
+    const watchMs = performance.now() - state.startedAt;
+    if (watchMs >= 3000) {
+      emitBehavior("valid_play", watchMs);
+    }
+    if (Number.isFinite(video.duration) && video.duration > 0 && video.currentTime / video.duration >= 0.95) {
+      emitBehavior("finish", watchMs, true);
+    }
   }
 
   function handleWaiting() {
@@ -1282,12 +1360,17 @@ function VideoStage({
           preload={active ? "metadata" : "none"}
           onLoadedData={handleLoadedData}
           onPlaying={handlePlaying}
+          onTimeUpdate={handleTimeUpdate}
           onWaiting={handleWaiting}
           onPause={flushQoS}
-          onEnded={flushQoS}
+          onEnded={() => {
+            handleTimeUpdate();
+            flushQoS();
+          }}
+          onClick={() => emitBehavior("click")}
         />
       ) : (
-        <img className="stage-media portrait-media" src={media} alt="" />
+        <img className="stage-media portrait-media" src={media} alt="" onClick={() => emitBehavior("click")} />
       )}
       <div className="stage-copy">
         <div className="creator-row">
@@ -1312,6 +1395,14 @@ function VideoStage({
         <ActionButton icon="favorite" label={formatMetric(item.like_count)} active={liked} onClick={onLike} />
         <ActionButton icon="chat_bubble" label={formatMetric(item.comment_count)} onClick={onComment} />
         <ActionButton icon="bookmark" label={formatMetric(item.favorite_count)} active={favorited} onClick={onFavorite} />
+        {item.feed_scene === "recommend" && <ActionButton icon="visibility_off" label="不喜欢" compact onClick={() => {
+          emitBehavior("not_interested");
+          onNotInterested?.();
+        }} />}
+        {item.feed_scene === "recommend" && !ownVideo && <ActionButton icon="person_off" label="少看TA" compact onClick={() => {
+          emitBehavior("hide_author");
+          onHideAuthor?.();
+        }} />}
         <ActionButton icon="share" label="" compact />
       </div>
       <div className="progress-track">
@@ -2563,6 +2654,14 @@ function createVideoQoSState(videoID) {
     playingStartedAt: 0,
     firstFrameMs: undefined,
     stutterCount: 0
+  };
+}
+
+function createVideoBehaviorState(videoID) {
+  return {
+    videoID,
+    startedAt: 0,
+    sent: new Set()
   };
 }
 
