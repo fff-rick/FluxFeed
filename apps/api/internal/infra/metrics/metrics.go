@@ -200,6 +200,15 @@ var (
 		},
 		[]string{"job", "result"},
 	)
+
+	GovernanceEventsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "gcfeed",
+			Name:      "governance_events_total",
+			Help:      "System governance decisions by component and outcome.",
+		},
+		[]string{"component", "decision"},
+	)
 )
 
 func init() {
@@ -224,7 +233,15 @@ func init() {
 		VideoProcessingDuration,
 		WorkerJobsTotal,
 		WorkerJobDuration,
+		GovernanceEventsTotal,
 	)
+}
+
+func ObserveGovernance(component string, decision string) {
+	GovernanceEventsTotal.WithLabelValues(
+		normalizeLabel(component, "unknown"),
+		normalizeLabel(decision, "unknown"),
+	).Inc()
 }
 
 func ObserveRecommendationRecall(source string, count int, duration time.Duration, err error) {

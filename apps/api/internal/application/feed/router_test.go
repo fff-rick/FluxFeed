@@ -3,6 +3,7 @@ package applicationfeed
 import (
 	domainfeed "FluxFeed/internal/domain/feed"
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -10,6 +11,12 @@ import (
 )
 
 type stubStrategy struct{ scene domainfeed.Scene }
+
+type candidateSourceFunc func(context.Context, FeedRequest, int) (*FeedPage, error)
+
+func (f candidateSourceFunc) Load(ctx context.Context, req FeedRequest, limit int) (*FeedPage, error) {
+	return f(ctx, req, limit)
+}
 
 type stubSeenCache map[int64]struct{}
 
@@ -133,6 +140,67 @@ func TestCandidatePipelineMergeDedupRankMixTopN(t *testing.T) {
 	got := NewCandidatePipeline(LatestRanker{}, AuthorDiversityMixer{}).Run(context.Background(), FeedRequest{}, pages, 2)
 	if len(got) != 2 || got[0].VideoID != 2 || got[1].VideoID != 3 {
 		t.Fatalf("unexpected pipeline result: %#v", got)
+	}
+}
+
+func TestGovernedCandidateSourceFallsBackWithoutLeakingCursor(t *testing.T) {
+	primaryHadDeadline := false
+	source := governedCandidateSource{
+		timeout: time.Second,
+		primary: candidateSourceFunc(func(ctx context.Context, _ FeedRequest, _ int) (*FeedPage, error) {
+			_, primaryHadDeadline = ctx.Deadline()
+			return nil, context.DeadlineExceeded
+		}),
+		fallbacks: []CandidateSource{candidateSourceFunc(func(_ context.Context, req FeedRequest, _ int) (*FeedPage, error) {
+			if req.Cursor != "" {
+				t.Fatalf("fallback received recommendation cursor: %q", req.Cursor)
+			}
+			return &FeedPage{Scene: domainfeed.SceneHot, Items: []*domainfeed.FeedPageItem{{VideoID: 9}}, NextCursor: "hot", HasMore: true}, nil
+		})},
+	}
+	page, err := source.Load(context.Background(), FeedRequest{Scene: domainfeed.SceneRecommend, Cursor: "recommend"}, 10)
+	if err != nil || !primaryHadDeadline || page.Scene != domainfeed.SceneRecommend || page.NextCursor != "" || page.HasMore || page.Items[0].VideoID != 9 {
+		t.Fatalf("unexpected degraded page: %+v, deadline=%v, err=%v", page, primaryHadDeadline, err)
+	}
+}
+
+func TestGovernedCandidateSourceRetriesTransientFailure(t *testing.T) {
+	calls := 0
+	source := governedCandidateSource{
+		timeout:      time.Second,
+		maxRetries:   1,
+		retryBackoff: time.Nanosecond,
+		primary: candidateSourceFunc(func(context.Context, FeedRequest, int) (*FeedPage, error) {
+			calls++
+			if calls == 1 {
+				return nil, ErrLoadFeedFailed
+			}
+			return &FeedPage{Scene: domainfeed.SceneRecommend}, nil
+		}),
+	}
+	page, err := source.Load(context.Background(), FeedRequest{Scene: domainfeed.SceneRecommend}, 10)
+	if err != nil || page == nil || calls != 2 {
+		t.Fatalf("unexpected retry result: page=%+v calls=%d err=%v", page, calls, err)
+	}
+}
+
+func TestGovernedCandidateSourceDoesNotMaskInputError(t *testing.T) {
+	fallbackCalled := false
+	governor := newSourceGovernor(1, 1, time.Minute)
+	source := governedCandidateSource{
+		timeout:  time.Second,
+		governor: governor,
+		primary: candidateSourceFunc(func(context.Context, FeedRequest, int) (*FeedPage, error) {
+			return nil, domainfeed.ErrInvalidCursor
+		}),
+		fallbacks: []CandidateSource{candidateSourceFunc(func(context.Context, FeedRequest, int) (*FeedPage, error) {
+			fallbackCalled = true
+			return &FeedPage{}, nil
+		})},
+	}
+	_, err := source.Load(context.Background(), FeedRequest{}, 10)
+	if !errors.Is(err, domainfeed.ErrInvalidCursor) || fallbackCalled || !governor.allow() {
+		t.Fatalf("input error was masked or counted as dependency failure: fallback=%v err=%v", fallbackCalled, err)
 	}
 }
 

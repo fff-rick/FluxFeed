@@ -3,6 +3,8 @@ package applicationfeed
 import (
 	applicationrecommendation "FluxFeed/internal/application/recommendation"
 	domainfeed "FluxFeed/internal/domain/feed"
+	domainrecommendation "FluxFeed/internal/domain/recommendation"
+	inframetrics "FluxFeed/internal/infra/metrics"
 	"context"
 	"errors"
 	"strings"
@@ -59,6 +61,96 @@ func (s optionalCandidateSource) Load(ctx context.Context, req FeedRequest, limi
 		return &FeedPage{Scene: req.Scene, Items: []*domainfeed.FeedPageItem{}}, nil
 	}
 	return page, err
+}
+
+// governedCandidateSource 给主召回设置独立超时，并按顺序尝试稳定的本地兜底源。
+type governedCandidateSource struct {
+	primary      CandidateSource
+	timeout      time.Duration
+	governor     *sourceGovernor
+	degraded     func() bool
+	maxRetries   int
+	retryBackoff time.Duration
+	fallbacks    []CandidateSource
+}
+
+func (s governedCandidateSource) Load(ctx context.Context, req FeedRequest, limit int) (*FeedPage, error) {
+	if s.degraded != nil && s.degraded() {
+		inframetrics.ObserveGovernance("recommendation", "manual_degrade")
+		return s.loadFallback(ctx, req, limit, ErrLoadFeedFailed)
+	}
+	if !s.governor.acquire() {
+		inframetrics.ObserveGovernance("recommendation", "bulkhead_full")
+		return s.loadFallback(ctx, req, limit, ErrLoadFeedFailed)
+	}
+	acquired := true
+	defer func() {
+		if acquired {
+			s.governor.release()
+		}
+	}()
+	if !s.governor.allow() {
+		inframetrics.ObserveGovernance("recommendation", "circuit_open")
+		s.governor.release()
+		acquired = false
+		return s.loadFallback(ctx, req, limit, ErrLoadFeedFailed)
+	}
+
+	primaryCtx, cancel := context.WithTimeout(ctx, s.timeout)
+	defer cancel()
+	var page *FeedPage
+	var err error
+	for attempt := 0; attempt <= s.maxRetries; attempt++ {
+		page, err = s.primary.Load(primaryCtx, req, limit)
+		if err == nil || isCandidateInputError(err) || primaryCtx.Err() != nil || attempt == s.maxRetries {
+			break
+		}
+		if !waitForCandidateRetry(primaryCtx, s.retryBackoff) {
+			break
+		}
+		inframetrics.ObserveGovernance("recommendation", "retry")
+	}
+	if err == nil {
+		s.governor.record(true)
+		return page, nil
+	}
+	if isCandidateInputError(err) {
+		// 参数错误证明依赖可达，不应计入熔断失败；半开探测也可据此关闭熔断。
+		s.governor.record(true)
+		return nil, err
+	}
+	if ctx.Err() != nil {
+		s.governor.record(false)
+		return nil, ctx.Err()
+	}
+	s.governor.record(false)
+	s.governor.release()
+	acquired = false
+	return s.loadFallback(ctx, req, limit, err)
+}
+
+func (s governedCandidateSource) loadFallback(ctx context.Context, req FeedRequest, limit int, primaryErr error) (*FeedPage, error) {
+	fallbackReq := req
+	fallbackReq.Cursor = ""
+	for _, fallback := range s.fallbacks {
+		if fallback == nil {
+			continue
+		}
+		page, fallbackErr := fallback.Load(ctx, fallbackReq, limit)
+		if fallbackErr != nil || page == nil {
+			continue
+		}
+		page.Scene = req.Scene
+		page.NextCursor = ""
+		page.HasMore = false
+		inframetrics.ObserveGovernance("recommendation", "fallback")
+		return page, nil
+	}
+	return nil, primaryErr
+}
+
+func isCandidateInputError(err error) bool {
+	return errors.Is(err, domainfeed.ErrInvalidCursor) || errors.Is(err, domainrecommendation.ErrInvalidCursor)
 }
 
 type TimelineCandidateSource struct {
@@ -232,6 +324,9 @@ func (s *RecommendCandidateSource) Load(ctx context.Context, req FeedRequest, li
 	}
 	result, err := s.recommender.Recommend(ctx, applicationrecommendation.CandidateRequest{UserID: req.ViewerID, Scene: string(domainfeed.SceneRecommend), RequestID: clientContextValue(req.ClientContext, "request_id"), Cursor: req.Cursor, Limit: limit})
 	if err != nil {
+		if errors.Is(err, domainrecommendation.ErrInvalidCursor) {
+			return nil, domainfeed.ErrInvalidCursor
+		}
 		if errors.Is(err, applicationrecommendation.ErrLoadRecommendationFailed) {
 			return nil, ErrLoadFeedFailed
 		}

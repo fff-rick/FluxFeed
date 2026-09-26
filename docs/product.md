@@ -104,8 +104,8 @@ P0 目标是完整跑通用户端主链路和基础稳定性链路。
 | 已实现 | 播放优化 | GET | `/api/preload-videos` | 预加载建议 |
 | 已实现 | 播放优化 | POST | `/api/playback-qos-reports` | Web 播放质量上报 |
 | 已实现 | 播放优化 | POST | `/internal/playback-qos-reports` | 服务端播放质量上报 |
-| 规划中 | 系统治理 | GET | `/internal/governance/degrade-switches` | 查询降级开关 |
-| 规划中 | 系统治理 | PATCH | `/api/admin/governance/degrade-switches/{key}` | 调整降级开关 |
+| 已实现 | 系统治理 | GET | `/internal/governance/degrade-switches` | 查询降级开关 |
+| 已实现 | 系统治理 | PATCH | `/internal/governance/degrade-switches/{key}` | 调整降级开关 |
 | 规划中 | 系统治理 | POST | `/internal/dead-letter-retries` | 死信任务重试 |
 | 规划中 | 监控告警 | GET | `/api/admin/metric-dashboard` | 监控看板查询 |
 | 规划中 | 监控告警 | POST | `/api/admin/alerts/rules` | 告警规则创建 |

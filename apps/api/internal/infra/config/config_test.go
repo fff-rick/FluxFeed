@@ -9,7 +9,8 @@ func TestKafkaConfigLoadsFromApplicationConfigs(t *testing.T) {
 			t.Fatalf("LoadConfig(%s): %v", path, err)
 		}
 		if len(cfg.Kafka.Brokers) != 1 || cfg.Kafka.VideoTopic == "" ||
-			cfg.Kafka.FanoutGroup == cfg.Kafka.EmbeddingGroup || cfg.Kafka.RecommendationGroup == cfg.Kafka.FeatureGroup {
+			cfg.Kafka.FanoutGroup == cfg.Kafka.EmbeddingGroup || cfg.Kafka.RecommendationGroup == cfg.Kafka.FeatureGroup ||
+			cfg.Governance.RequestTimeout == "" || cfg.Governance.RateLimitRPS <= 0 {
 			t.Fatalf("unexpected Kafka config from %s: %+v", path, cfg.Kafka)
 		}
 	}

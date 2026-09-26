@@ -6,6 +6,13 @@ jwt:
 internal:
   token: "replace-with-internal-token"
 
+governance:
+  request_timeout: "3s"
+  recommendation_timeout: "500ms"
+  shutdown_timeout: "5s"
+  rate_limit_rps: 50
+  rate_limit_burst: 100
+
 database:
   host: "mysql"
   port: 3306

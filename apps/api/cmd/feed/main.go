@@ -1,7 +1,10 @@
 package main
 
 import (
+	"context"
 	"log"
+	"os/signal"
+	"syscall"
 
 	infraconfig "FluxFeed/internal/infra/config"
 	infradatabase "FluxFeed/internal/infra/database"
@@ -31,6 +34,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("init database failed: %v", err)
 	}
+	defer db.Close()
 	log.Println("database connection initialized")
 
 	// Gin 引擎只负责 HTTP 入口，业务依赖在 router.Register 中装配。
@@ -43,9 +47,13 @@ func main() {
 	}
 	log.Println("router registered")
 
-	// Run 会阻塞当前进程，直到服务器停止或启动失败。
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	// Run 会阻塞当前进程，收到终止信号后等待在途请求完成。
 	log.Println("server is running")
-	if err := infrahttpgin.Run(cfg, g); err != nil {
+	if err := infrahttpgin.Run(ctx, cfg, g); err != nil {
 		log.Fatalf("run server failed: %v", err)
 	}
+	log.Println("server stopped")
 }

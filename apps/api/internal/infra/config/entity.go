@@ -2,13 +2,23 @@ package infraconfig
 
 // Config 是应用启动配置的根结构，对应 configs/config.yaml。
 type Config struct {
-	Port     int            `yaml:"port"`
-	JWT      JWTConfig      `yaml:"jwt"`
-	Internal InternalConfig `yaml:"internal"`
-	Database DatabaseConfig `yaml:"database"`
-	Redis    RedisConfig    `yaml:"redis"`
-	Kafka    KafkaConfig    `yaml:"kafka"`
-	RabbitMQ RabbitMQConfig `yaml:"rabbitmq"`
+	Port       int              `yaml:"port"`
+	JWT        JWTConfig        `yaml:"jwt"`
+	Internal   InternalConfig   `yaml:"internal"`
+	Database   DatabaseConfig   `yaml:"database"`
+	Redis      RedisConfig      `yaml:"redis"`
+	Kafka      KafkaConfig      `yaml:"kafka"`
+	RabbitMQ   RabbitMQConfig   `yaml:"rabbitmq"`
+	Governance GovernanceConfig `yaml:"governance"`
+}
+
+// GovernanceConfig 保存 API 入口与推荐主链路的治理参数。
+type GovernanceConfig struct {
+	RequestTimeout        string `yaml:"request_timeout"`
+	RecommendationTimeout string `yaml:"recommendation_timeout"`
+	ShutdownTimeout       string `yaml:"shutdown_timeout"`
+	RateLimitRPS          int    `yaml:"rate_limit_rps"`
+	RateLimitBurst        int    `yaml:"rate_limit_burst"`
 }
 
 // KafkaConfig 保存统一事件总线的 Broker、Topic 和消费组配置。
