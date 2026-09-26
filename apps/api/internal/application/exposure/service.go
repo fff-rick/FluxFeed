@@ -66,7 +66,7 @@ func (s *Service) RecordViewEvent(ctx context.Context, userID int64, videoID int
 		return nil, ErrSaveExposureFailed
 	}
 	s.publishViewEventRecorded(ctx, savedEvent, exposure)
-	if exposure != nil && s.seen != nil {
+	if savedEvent.MarksSeen() && s.seen != nil {
 		_ = s.seen.MarkSeen(ctx, savedEvent.UserID, savedEvent.VideoID)
 	}
 

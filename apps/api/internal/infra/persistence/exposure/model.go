@@ -5,11 +5,11 @@ import "time"
 // ViewEventModel 映射 video_view_events 表，保存观看行为流水。
 type ViewEventModel struct {
 	ID        int64     `gorm:"column:id;primaryKey;autoIncrement"`
-	UserID    int64     `gorm:"column:user_id;not null;index:idx_user_created,priority:1"`
-	VideoID   int64     `gorm:"column:video_id;not null;index:idx_video_created,priority:1"`
+	UserID    int64     `gorm:"column:user_id;not null;index:idx_user_created,priority:1;uniqueIndex:uk_view_event_request,priority:1"`
+	VideoID   int64     `gorm:"column:video_id;not null;index:idx_video_created,priority:1;uniqueIndex:uk_view_event_request,priority:2"`
 	Scene     string    `gorm:"column:scene;size:32;not null;index:idx_user_scene_created,priority:2"`
-	RequestID *string   `gorm:"column:request_id;size:64;index:idx_request_event,priority:1"`
-	EventType string    `gorm:"column:event_type;size:32;not null;index:idx_request_event,priority:2"`
+	RequestID *string   `gorm:"column:request_id;size:64;index:idx_request_event,priority:1;uniqueIndex:uk_view_event_request,priority:3"`
+	EventType string    `gorm:"column:event_type;size:32;not null;index:idx_request_event,priority:2;uniqueIndex:uk_view_event_request,priority:4"`
 	WatchMs   int       `gorm:"column:watch_ms;not null;default:0"`
 	Completed bool      `gorm:"column:completed;not null;default:false"`
 	CreatedAt time.Time `gorm:"column:created_at;autoCreateTime;index:idx_user_created,priority:2;index:idx_video_created,priority:2;index:idx_user_scene_created,priority:3"`

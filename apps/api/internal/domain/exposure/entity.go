@@ -6,10 +6,15 @@ import (
 )
 
 const (
-	EventTypeExposed  = "exposed"
-	EventTypePlay     = "play"
-	EventTypeComplete = "complete"
-	EventTypeSkip     = "skip"
+	EventTypeExposed       = "exposed"
+	EventTypeClick         = "click"
+	EventTypePlay          = "play"
+	EventTypeValidPlay     = "valid_play"
+	EventTypeFinish        = "finish"
+	EventTypeComplete      = "complete" // 兼容旧客户端，等价于 finish。
+	EventTypeSkip          = "skip"
+	EventTypeNotInterested = "not_interested"
+	EventTypeHideAuthor    = "hide_author"
 
 	MaxSceneLength     = 32
 	MaxRequestIDLength = 64
@@ -76,7 +81,7 @@ func NewViewEvent(userID int64, videoID int64, scene string, requestID string, e
 		RequestID: requestID,
 		EventType: eventType,
 		WatchMs:   watchMs,
-		Completed: completed || eventType == EventTypeComplete,
+		Completed: completed || eventType == EventTypeFinish || eventType == EventTypeComplete,
 	}, nil
 }
 
@@ -115,9 +120,36 @@ func (e *ViewEvent) CountsAsExposure() bool {
 	return e != nil && e.EventType == EventTypeExposed
 }
 
+// MarksSeen 判断行为是否应立即从后续推荐中隐藏该视频。
+func (e *ViewEvent) MarksSeen() bool {
+	return e != nil && (e.EventType == EventTypeExposed || IsNegativeFeedback(e.EventType))
+}
+
+// AffectsInterestProfile 判断行为是否需要触发用户兴趣画像刷新。
+func AffectsInterestProfile(eventType string) bool {
+	switch eventType {
+	case EventTypeClick, EventTypePlay, EventTypeValidPlay, EventTypeFinish, EventTypeComplete,
+		EventTypeSkip, EventTypeNotInterested, EventTypeHideAuthor:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsNegativeFeedback 判断事件是否表达减少推荐的明确或隐式意图。
+func IsNegativeFeedback(eventType string) bool {
+	switch eventType {
+	case EventTypeSkip, EventTypeNotInterested, EventTypeHideAuthor:
+		return true
+	default:
+		return false
+	}
+}
+
 func isSupportedEventType(eventType string) bool {
 	switch eventType {
-	case EventTypeExposed, EventTypePlay, EventTypeComplete, EventTypeSkip:
+	case EventTypeExposed, EventTypeClick, EventTypePlay, EventTypeValidPlay, EventTypeFinish, EventTypeComplete,
+		EventTypeSkip, EventTypeNotInterested, EventTypeHideAuthor:
 		return true
 	default:
 		return false

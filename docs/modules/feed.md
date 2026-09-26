@@ -95,10 +95,16 @@ Feed 依赖已有 `video` 和 `video_stat` 表读取已上线视频与互动计�
 | `video_id` | 视频 ID |
 | `scene` | Feed 场景 |
 | `request_id` | 一次 Feed 请求标识 |
-| `event_type` | `exposed`、`play`、`complete`、`skip` |
+| `event_type` | `exposed`、`click`、`play`、`valid_play`、`finish`、`skip`、`not_interested`、`hide_author`；兼容旧值 `complete` |
 | `watch_ms` | 观看时长 |
 | `completed` | 是否完播 |
 | `created_at` | 事件时间 |
+
+带 `request_id` 的同用户、视频和事件类型只记录一次，避免客户端重试造成重复曝光。
+`skip` 作为负反馈会立即写入 Seen Filter、在 30 天内排除该视频，并触发兴趣画像重算；
+`click < play < valid_play < finish` 依次提高正向兴趣权重。
+`not_interested` 显式屏蔽当前视频，`hide_author` 在 30 天内屏蔽对应作者；两者同时从
+相似召回种子和用户画像信号中排除对应内容。
 
 `exposures`：
 

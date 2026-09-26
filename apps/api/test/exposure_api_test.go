@@ -256,9 +256,18 @@ func TestExposureMarksSeenOnlyForExposureEvents(t *testing.T) {
 	if _, err := service.RecordViewEvent(context.Background(), 42, 1001, "recommend", "seen-2", "complete", 1000, true); err != nil {
 		t.Fatalf("record completion: %v", err)
 	}
+	if _, err := service.RecordViewEvent(context.Background(), 42, 1002, "recommend", "seen-3", "skip", 0, false); err != nil {
+		t.Fatalf("record negative feedback: %v", err)
+	}
+	if _, err := service.RecordViewEvent(context.Background(), 42, 1001, "recommend", "seen-4", "not_interested", 0, false); err != nil {
+		t.Fatalf("record explicit negative feedback: %v", err)
+	}
+	if _, err := service.RecordViewEvent(context.Background(), 42, 1002, "recommend", "seen-5", "hide_author", 0, false); err != nil {
+		t.Fatalf("record author feedback: %v", err)
+	}
 	recorder.mu.Lock()
 	defer recorder.mu.Unlock()
-	if len(recorder.marked) != 1 || recorder.marked[0] != 1001 {
+	if len(recorder.marked) != 4 || recorder.marked[0] != 1001 || recorder.marked[1] != 1002 || recorder.marked[2] != 1001 || recorder.marked[3] != 1002 {
 		t.Fatalf("unexpected seen writes: %v", recorder.marked)
 	}
 }
