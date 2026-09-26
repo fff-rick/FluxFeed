@@ -3,7 +3,9 @@ package infrarecommendation
 import (
 	domainembedding "FluxFeed/internal/domain/embedding"
 	domainexposure "FluxFeed/internal/domain/exposure"
+	domaininteraction "FluxFeed/internal/domain/interaction"
 	domainrecommendation "FluxFeed/internal/domain/recommendation"
+	domainrelation "FluxFeed/internal/domain/relation"
 	domainvideo "FluxFeed/internal/domain/video"
 	infraexposure "FluxFeed/internal/infra/persistence/exposure"
 	"context"
@@ -17,6 +19,7 @@ import (
 
 const hotScoreExpression = "COALESCE(vs.like_count, 0) * 3 + COALESCE(vs.comment_count, 0) * 5 + COALESCE(vs.favorite_count, 0) * 4"
 const positiveEventWindow = 30 * 24 * time.Hour
+const profileSignalLimit = 200
 
 type Repository struct {
 	db *gorm.DB
@@ -38,13 +41,13 @@ func New(db *gorm.DB) *Repository {
 	return &Repository{db: db}
 }
 
-func (r *Repository) ListCandidatePool(ctx context.Context, userID int64, limit int) ([]*domainrecommendation.Candidate, error) {
+func (r *Repository) ListCandidatesBySource(ctx context.Context, userID int64, source string, limit int) ([]*domainrecommendation.Candidate, error) {
 	if limit <= 0 {
 		return []*domainrecommendation.Candidate{}, nil
 	}
 
 	var models []candidateModel
-	err := r.db.WithContext(ctx).
+	query := r.db.WithContext(ctx).
 		Table("video AS v").
 		Select("v.id AS video_id, v.author_id, ("+hotScoreExpression+") AS hot_score, v.published_at").
 		Joins("LEFT JOIN video_stat AS vs ON vs.video_id = v.id").
@@ -53,13 +56,42 @@ func (r *Repository) ListCandidatePool(ctx context.Context, userID int64, limit 
 			userID,
 			time.Now().Add(-domainrecommendation.RecentExposureWindow),
 		).
-		Where("v.status = ? AND v.published_at IS NOT NULL AND e.video_id IS NULL", domainvideo.StatusPublished).
-		Order("hot_score DESC").
-		Order("v.published_at DESC").
-		Order("v.id DESC").
-		Limit(limit).
-		Scan(&models).
-		Error
+		Where("v.status = ? AND v.published_at IS NOT NULL AND e.video_id IS NULL", domainvideo.StatusPublished)
+	switch source {
+	case domainrecommendation.RecallSourceHot:
+		query = query.Order("hot_score DESC").Order("v.published_at DESC")
+	case domainrecommendation.RecallSourceLatest:
+		query = query.Order("v.published_at DESC")
+	case domainrecommendation.RecallSourceFollowing:
+		query = query.Joins("JOIN user_follow AS f ON f.target_user_id = v.author_id AND f.user_id = ? AND f.status = ?", userID, domainrelation.FollowStatusActive).
+			Order("v.published_at DESC")
+	case domainrecommendation.RecallSourceInterest, domainrecommendation.RecallSourceSimilar:
+		// ponytail: 应用层对最多 500 个向量做余弦召回；视频规模需要 ANN 时替换这里。
+		query = query.Joins("JOIN video_embedding AS ve ON ve.video_id = v.id AND ve.model = ?", domainembedding.HashNgramModel).
+			Order("v.published_at DESC")
+	case domainrecommendation.RecallSourceCollaborative:
+		// ponytail: 30 天窗口内在线聚合共同观看用户；数据量增大后物化 item-item 共现表。
+		query = query.Joins(`JOIN (
+			SELECT candidate.video_id, COUNT(DISTINCT peer.user_id) AS affinity
+			FROM video_view_events AS mine
+			JOIN video_view_events AS peer
+			  ON peer.video_id = mine.video_id AND peer.user_id <> mine.user_id
+			  AND peer.created_at >= ? AND peer.event_type IN (?, ?)
+			JOIN video_view_events AS candidate
+			  ON candidate.user_id = peer.user_id AND candidate.video_id <> mine.video_id
+			  AND candidate.created_at >= ? AND candidate.event_type IN (?, ?)
+			WHERE mine.user_id = ? AND mine.created_at >= ? AND mine.event_type IN (?, ?)
+			GROUP BY candidate.video_id
+		) AS collaborative ON collaborative.video_id = v.id`,
+			time.Now().Add(-positiveEventWindow), domainexposure.EventTypePlay, domainexposure.EventTypeComplete,
+			time.Now().Add(-positiveEventWindow), domainexposure.EventTypePlay, domainexposure.EventTypeComplete,
+			userID, time.Now().Add(-positiveEventWindow), domainexposure.EventTypePlay, domainexposure.EventTypeComplete,
+		).Where("NOT EXISTS (SELECT 1 FROM video_view_events own WHERE own.user_id = ? AND own.video_id = v.id)", userID).
+			Order("collaborative.affinity DESC").Order("v.published_at DESC")
+	default:
+		return []*domainrecommendation.Candidate{}, nil
+	}
+	err := query.Order("v.id DESC").Limit(limit).Scan(&models).Error
 	if err != nil {
 		return nil, err
 	}
@@ -73,11 +105,26 @@ func (r *Repository) ListCandidatePool(ctx context.Context, userID int64, limit 
 			0,
 			model.HotScore,
 			0,
-			"",
+			source,
 			model.PublishedAt,
 		))
 	}
 	return candidates, nil
+}
+
+func (r *Repository) ListRecentPositiveVideoIDs(ctx context.Context, userID int64, limit int) ([]int64, error) {
+	if limit <= 0 {
+		return []int64{}, nil
+	}
+	var rows []struct{ VideoID int64 }
+	err := r.db.WithContext(ctx).Table("video_view_events").Select("video_id").
+		Where("user_id = ? AND created_at >= ? AND event_type IN ?", userID, time.Now().Add(-positiveEventWindow), positiveEventTypes()).
+		Group("video_id").Order("MAX(created_at) DESC").Limit(limit).Scan(&rows).Error
+	videoIDs := make([]int64, 0, len(rows))
+	for _, row := range rows {
+		videoIDs = append(videoIDs, row.VideoID)
+	}
+	return videoIDs, err
 }
 
 func (r *Repository) LoadUserInterestVector(ctx context.Context, userID int64) ([]float64, bool, error) {
@@ -95,11 +142,14 @@ func (r *Repository) LoadUserInterestVector(ctx context.Context, userID int64) (
 	return r.calculateUserInterestVector(ctx, userID)
 }
 
-// RefreshUserInterestVector 从权威观看流水重算用户向量，重复消费同一事件结果不变。
+// RefreshUserInterestVector 从权威行为数据重算用户向量，重复消费同一事件结果不变。
 func (r *Repository) RefreshUserInterestVector(ctx context.Context, userID int64) error {
 	vector, ok, err := r.calculateUserInterestVector(ctx, userID)
-	if err != nil || !ok {
+	if err != nil {
 		return err
+	}
+	if !ok {
+		return InvalidateUserInterest(r.db.WithContext(ctx), userID)
 	}
 	content, err := json.Marshal(vector)
 	if err != nil {
@@ -116,21 +166,18 @@ func (r *Repository) RefreshUserInterestVector(ctx context.Context, userID int64
 }
 
 func (r *Repository) calculateUserInterestVector(ctx context.Context, userID int64) ([]float64, bool, error) {
+	accumulator := &vectorAccumulator{}
 	rows, err := r.db.WithContext(ctx).
 		Table("video_view_events AS ev").
 		Select("ve.embedding_json, ev.event_type, ev.watch_ms, ev.completed").
 		Joins("JOIN video_embedding AS ve ON ve.video_id = ev.video_id AND ve.model = ?", domainembedding.HashNgramModel).
 		Where("ev.user_id = ? AND ev.created_at >= ? AND ev.event_type IN ?", userID, time.Now().Add(-positiveEventWindow), positiveEventTypes()).
 		Order("ev.created_at DESC").
-		Limit(200).
+		Limit(profileSignalLimit).
 		Rows()
 	if err != nil {
 		return nil, false, err
 	}
-	defer rows.Close()
-
-	var sum []float64
-	var totalWeight float64
 	for rows.Next() {
 		var embeddingJSON string
 		var eventType string
@@ -139,32 +186,122 @@ func (r *Repository) calculateUserInterestVector(ctx context.Context, userID int
 		if err := rows.Scan(&embeddingJSON, &eventType, &watchMs, &completed); err != nil {
 			return nil, false, err
 		}
-		vector, err := decodeVector(embeddingJSON)
-		if err != nil || len(vector) == 0 {
-			continue
-		}
-		if len(sum) == 0 {
-			sum = make([]float64, len(vector))
-		}
-		if len(vector) != len(sum) {
-			continue
-		}
-		weight := eventWeight(eventType, watchMs, completed)
-		for i := range vector {
-			sum[i] += vector[i] * weight
-		}
-		totalWeight += weight
+		accumulator.Add(embeddingJSON, eventWeight(eventType, watchMs, completed))
 	}
 	if err := rows.Err(); err != nil {
+		rows.Close()
 		return nil, false, err
 	}
-	if len(sum) == 0 || totalWeight == 0 {
+	rows.Close()
+
+	actionRows, err := r.db.WithContext(ctx).Table("interaction_action AS ia").
+		Select("ve.embedding_json, ia.action_type").
+		Joins("JOIN video_embedding AS ve ON ve.video_id = ia.video_id AND ve.model = ?", domainembedding.HashNgramModel).
+		Where("ia.user_id = ? AND ia.status = ? AND ia.updated_at >= ?", userID, domaininteraction.ActionStatusActive, time.Now().Add(-positiveEventWindow)).
+		Order("ia.updated_at DESC").Limit(profileSignalLimit).Rows()
+	if err != nil {
+		return nil, false, err
+	}
+	for actionRows.Next() {
+		var embeddingJSON, actionType string
+		if err := actionRows.Scan(&embeddingJSON, &actionType); err != nil {
+			actionRows.Close()
+			return nil, false, err
+		}
+		weight := 3.0
+		if actionType == domaininteraction.ActionTypeFavorite {
+			weight = 4
+		}
+		accumulator.Add(embeddingJSON, weight)
+	}
+	if err := actionRows.Err(); err != nil {
+		actionRows.Close()
+		return nil, false, err
+	}
+	actionRows.Close()
+
+	commentRows, err := r.db.WithContext(ctx).Table("interaction_comment AS c").
+		Select("ve.embedding_json").
+		Joins("JOIN video_embedding AS ve ON ve.video_id = c.video_id AND ve.model = ?", domainembedding.HashNgramModel).
+		Where("c.user_id = ? AND c.status = ? AND c.created_at >= ?", userID, domaininteraction.CommentStatusNormal, time.Now().Add(-positiveEventWindow)).
+		Order("c.created_at DESC").Limit(profileSignalLimit).Rows()
+	if err != nil {
+		return nil, false, err
+	}
+	for commentRows.Next() {
+		var embeddingJSON string
+		if err := commentRows.Scan(&embeddingJSON); err != nil {
+			commentRows.Close()
+			return nil, false, err
+		}
+		accumulator.Add(embeddingJSON, 5)
+	}
+	if err := commentRows.Err(); err != nil {
+		commentRows.Close()
+		return nil, false, err
+	}
+	commentRows.Close()
+
+	followRows, err := r.db.WithContext(ctx).Table("user_follow AS f").
+		Select("ve.embedding_json").
+		Joins("JOIN video AS v ON v.author_id = f.target_user_id AND v.status = ? AND v.published_at >= ?", domainvideo.StatusPublished, time.Now().Add(-positiveEventWindow)).
+		Joins("JOIN video_embedding AS ve ON ve.video_id = v.id AND ve.model = ?", domainembedding.HashNgramModel).
+		Where("f.user_id = ? AND f.status = ?", userID, domainrelation.FollowStatusActive).
+		Order("v.published_at DESC").Limit(20).Rows()
+	if err != nil {
+		return nil, false, err
+	}
+	for followRows.Next() {
+		var embeddingJSON string
+		if err := followRows.Scan(&embeddingJSON); err != nil {
+			followRows.Close()
+			return nil, false, err
+		}
+		accumulator.Add(embeddingJSON, 0.25)
+	}
+	if err := followRows.Err(); err != nil {
+		followRows.Close()
+		return nil, false, err
+	}
+	followRows.Close()
+
+	return accumulator.Average()
+}
+
+type vectorAccumulator struct {
+	sum         []float64
+	totalWeight float64
+}
+
+func (a *vectorAccumulator) Add(content string, weight float64) {
+	vector, err := decodeVector(content)
+	if err != nil || len(vector) == 0 || weight <= 0 {
+		return
+	}
+	if len(a.sum) == 0 {
+		a.sum = make([]float64, len(vector))
+	}
+	if len(vector) != len(a.sum) {
+		return
+	}
+	for index := range vector {
+		a.sum[index] += vector[index] * weight
+	}
+	a.totalWeight += weight
+}
+
+func (a *vectorAccumulator) Average() ([]float64, bool, error) {
+	if len(a.sum) == 0 || a.totalWeight == 0 {
 		return nil, false, nil
 	}
-	for i := range sum {
-		sum[i] = sum[i] / totalWeight
+	for index := range a.sum {
+		a.sum[index] /= a.totalWeight
 	}
-	return sum, true, nil
+	return a.sum, true, nil
+}
+
+func InvalidateUserInterest(tx *gorm.DB, userID int64) error {
+	return tx.Where("user_id = ? AND model = ?", userID, domainembedding.HashNgramModel).Delete(&UserInterestModel{}).Error
 }
 
 func (r *Repository) LoadVideoVectors(ctx context.Context, videoIDs []int64) (map[int64][]float64, error) {

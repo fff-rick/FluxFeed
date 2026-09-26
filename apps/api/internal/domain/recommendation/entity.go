@@ -14,6 +14,15 @@ const RecentExposureWindow = 7 * 24 * time.Hour
 const ExposureDecisionReasonFresh = "fresh"
 const ExposureDecisionReasonRecentlyExposed = "recently_exposed"
 
+const (
+	RecallSourceHot           = "hot"
+	RecallSourceLatest        = "latest"
+	RecallSourceFollowing     = "following"
+	RecallSourceInterest      = "interest"
+	RecallSourceSimilar       = "similar"
+	RecallSourceCollaborative = "collaborative"
+)
+
 type CandidateRequest struct {
 	UserID    int64
 	Scene     string

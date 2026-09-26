@@ -7,6 +7,7 @@ import (
 	domainrelation "FluxFeed/internal/domain/relation"
 	infraaccount "FluxFeed/internal/infra/persistence/account"
 	infraoutbox "FluxFeed/internal/infra/persistence/outbox"
+	infrarecommendation "FluxFeed/internal/infra/persistence/recommendation"
 	"context"
 	"errors"
 	"strings"
@@ -157,6 +158,9 @@ func (r *Repository) SetFollow(ctx context.Context, userID int64, targetUserID i
 			if err := r.outbox.Add(tx, r.relationTopic, event); err != nil {
 				return err
 			}
+		}
+		if changed {
+			return infrarecommendation.InvalidateUserInterest(tx, userID)
 		}
 		return nil
 	})

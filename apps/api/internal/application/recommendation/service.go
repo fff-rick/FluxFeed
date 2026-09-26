@@ -3,6 +3,7 @@ package applicationrecommendation
 import (
 	domainembedding "FluxFeed/internal/domain/embedding"
 	domainrecommendation "FluxFeed/internal/domain/recommendation"
+	inframetrics "FluxFeed/internal/infra/metrics"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -11,12 +12,15 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 )
 
 const defaultLimit = 10
-const candidatePoolMultiplier = 8
-const minCandidatePoolSize = 50
-const maxCandidatePoolSize = 500
+const recallPerSource = 100
+const interestRecallPoolSize = 500
+const preRankLimit = 200
+const defaultRankLimit = 50
 
 var ErrLoadRecommendationFailed = errors.New("failed to load recommendations")
 var ErrLoadExposureDecisionsFailed = errors.New("failed to load exposure decisions")
@@ -107,15 +111,19 @@ func (s *Service) Recommend(ctx context.Context, input CandidateRequest) (*Candi
 		return nil, err
 	}
 
-	poolLimit := candidatePoolLimit(limit)
-	pool, err := s.repo.ListCandidatePool(ctx, req.UserID, poolLimit)
+	pool, err := s.recallCandidates(ctx, req.UserID)
 	if err != nil {
 		return nil, ErrLoadRecommendationFailed
 	}
+	pool = preRankCandidates(pool, s.now(), preRankLimit)
 
 	ranked, err := s.rankCandidates(ctx, req.UserID, pool)
 	if err != nil {
 		return nil, ErrLoadRecommendationFailed
+	}
+	rankLimit := max(defaultRankLimit, limit+1)
+	if len(ranked) > rankLimit {
+		ranked = ranked[:rankLimit]
 	}
 	ranked = filterByCursor(ranked, req.Cursor)
 
@@ -142,6 +150,159 @@ func (s *Service) Recommend(ctx context.Context, input CandidateRequest) (*Candi
 		NextCursor: nextCursor,
 		HasMore:    hasMore,
 	}, nil
+}
+
+func (s *Service) recallCandidates(ctx context.Context, userID int64) ([]*domainrecommendation.Candidate, error) {
+	sources := []string{
+		domainrecommendation.RecallSourceHot,
+		domainrecommendation.RecallSourceLatest,
+		domainrecommendation.RecallSourceFollowing,
+		domainrecommendation.RecallSourceInterest,
+		domainrecommendation.RecallSourceSimilar,
+		domainrecommendation.RecallSourceCollaborative,
+	}
+	pools := make([][]*domainrecommendation.Candidate, len(sources))
+	group, groupCtx := errgroup.WithContext(ctx)
+	for index, source := range sources {
+		index, source := index, source
+		group.Go(func() error {
+			startedAt := time.Now()
+			limit := recallPerSource
+			if source == domainrecommendation.RecallSourceInterest || source == domainrecommendation.RecallSourceSimilar {
+				limit = interestRecallPoolSize
+			}
+			candidates, err := s.repo.ListCandidatesBySource(groupCtx, userID, source, limit)
+			if err == nil && source == domainrecommendation.RecallSourceInterest {
+				candidates, err = s.personalizeInterestRecall(groupCtx, userID, candidates)
+			}
+			if err == nil && source == domainrecommendation.RecallSourceSimilar {
+				candidates, err = s.personalizeSimilarRecall(groupCtx, userID, candidates)
+			}
+			if err == nil {
+				pools[index] = candidates
+			}
+			inframetrics.ObserveRecommendationRecall(source, len(candidates), time.Since(startedAt), err)
+			return err
+		})
+	}
+	if err := group.Wait(); err != nil {
+		return nil, err
+	}
+	return mergeRecallPools(pools), nil
+}
+
+func (s *Service) personalizeInterestRecall(ctx context.Context, userID int64, candidates []*domainrecommendation.Candidate) ([]*domainrecommendation.Candidate, error) {
+	if len(candidates) == 0 {
+		return candidates, nil
+	}
+	userVector, ok, err := s.repo.LoadUserInterestVector(ctx, userID)
+	if err != nil || !ok {
+		return candidates[:min(len(candidates), recallPerSource)], err
+	}
+	videoIDs := make([]int64, 0, len(candidates))
+	for _, candidate := range candidates {
+		if candidate != nil {
+			videoIDs = append(videoIDs, candidate.VideoID)
+		}
+	}
+	vectors, err := s.repo.LoadVideoVectors(ctx, videoIDs)
+	if err != nil {
+		return nil, err
+	}
+	return selectBySimilarity(userVector, candidates, vectors, 0, recallPerSource), nil
+}
+
+func (s *Service) personalizeSimilarRecall(ctx context.Context, userID int64, candidates []*domainrecommendation.Candidate) ([]*domainrecommendation.Candidate, error) {
+	if len(candidates) == 0 {
+		return candidates, nil
+	}
+	seedIDs, err := s.repo.ListRecentPositiveVideoIDs(ctx, userID, 1)
+	if err != nil || len(seedIDs) == 0 {
+		return []*domainrecommendation.Candidate{}, err
+	}
+	videoIDs := make([]int64, 0, len(candidates)+1)
+	videoIDs = append(videoIDs, seedIDs[0])
+	for _, candidate := range candidates {
+		if candidate != nil && candidate.VideoID != seedIDs[0] {
+			videoIDs = append(videoIDs, candidate.VideoID)
+		}
+	}
+	vectors, err := s.repo.LoadVideoVectors(ctx, videoIDs)
+	if err != nil {
+		return nil, err
+	}
+	return selectBySimilarity(vectors[seedIDs[0]], candidates, vectors, seedIDs[0], recallPerSource), nil
+}
+
+func selectBySimilarity(reference []float64, candidates []*domainrecommendation.Candidate, vectors map[int64][]float64, excludedVideoID int64, limit int) []*domainrecommendation.Candidate {
+	selected := make([]*domainrecommendation.Candidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		if candidate == nil || candidate.VideoID == excludedVideoID {
+			continue
+		}
+		similarity, err := domainembedding.CosineSimilarity(reference, vectors[candidate.VideoID])
+		if err != nil {
+			continue
+		}
+		candidate.Similarity = similarity
+		candidate.RankScore = similarity
+		selected = append(selected, candidate)
+	}
+	sortCandidates(selected)
+	return selected[:min(len(selected), limit)]
+}
+
+func mergeRecallPools(pools [][]*domainrecommendation.Candidate) []*domainrecommendation.Candidate {
+	merged := make([]*domainrecommendation.Candidate, 0)
+	byVideoID := make(map[int64]*domainrecommendation.Candidate)
+	for _, pool := range pools {
+		for _, candidate := range pool {
+			if candidate == nil || candidate.VideoID <= 0 {
+				continue
+			}
+			if existing := byVideoID[candidate.VideoID]; existing != nil {
+				if candidate.Similarity > existing.Similarity {
+					existing.Similarity = candidate.Similarity
+					if existing.Reason != domainrecommendation.RecallSourceFollowing {
+						existing.Reason = candidate.Reason
+					}
+				}
+				if candidate.Reason == domainrecommendation.RecallSourceFollowing {
+					existing.Reason = candidate.Reason
+				} else if existing.Reason != domainrecommendation.RecallSourceFollowing && candidate.Reason == domainrecommendation.RecallSourceCollaborative {
+					existing.Reason = candidate.Reason
+				} else if existing.Reason != domainrecommendation.RecallSourceFollowing && candidate.Reason == domainrecommendation.RecallSourceInterest {
+					existing.Reason = candidate.Reason
+				}
+				continue
+			}
+			value := *candidate
+			byVideoID[value.VideoID] = &value
+			merged = append(merged, &value)
+		}
+	}
+	return merged
+}
+
+func preRankCandidates(candidates []*domainrecommendation.Candidate, now time.Time, limit int) []*domainrecommendation.Candidate {
+	for _, candidate := range candidates {
+		if candidate == nil {
+			continue
+		}
+		candidate.FreshnessScore = freshnessScore(now, candidate.PublishedAt)
+		candidate.RankScore = rankScore(0, candidate.HotScore, candidate.FreshnessScore, false)
+		candidate.RankScore += max(candidate.Similarity, 0) * 0.50
+		if candidate.Reason == domainrecommendation.RecallSourceFollowing {
+			candidate.RankScore += 0.15
+		} else if candidate.Reason == domainrecommendation.RecallSourceCollaborative {
+			candidate.RankScore += 0.10
+		}
+	}
+	sortCandidates(candidates)
+	if limit > 0 && len(candidates) > limit {
+		return candidates[:limit]
+	}
+	return candidates
 }
 
 func (s *Service) DecideExposures(ctx context.Context, input ExposureDecisionInput) (*ExposureDecisionResult, error) {
@@ -251,8 +412,8 @@ func (s *Service) rankCandidates(ctx context.Context, userID int64, pool []*doma
 		}
 		value := *candidate
 		value.FreshnessScore = freshnessScore(now, value.PublishedAt)
-		value.Similarity = 0
 		if hasUserVector {
+			value.Similarity = 0
 			if vector := vectors[value.VideoID]; len(vector) > 0 {
 				similarity, err := domainembedding.CosineSimilarity(userVector, vector)
 				if err == nil {
@@ -261,7 +422,7 @@ func (s *Service) rankCandidates(ctx context.Context, userID int64, pool []*doma
 			}
 		}
 		value.RankScore = rankScore(value.Similarity, value.HotScore, value.FreshnessScore, hasUserVector)
-		value.Reason = recommendationReason(hasUserVector, value.Similarity, value.HotScore)
+		value.Reason = recommendationReason(hasUserVector, value.Similarity, value.HotScore, value.Reason)
 		ranked = append(ranked, &value)
 	}
 
@@ -277,17 +438,6 @@ func normalizeLimit(limit int) int {
 		return domainrecommendation.MaxLimit
 	}
 	return limit
-}
-
-func candidatePoolLimit(limit int) int {
-	poolLimit := limit * candidatePoolMultiplier
-	if poolLimit < minCandidatePoolSize {
-		poolLimit = minCandidatePoolSize
-	}
-	if poolLimit > maxCandidatePoolSize {
-		poolLimit = maxCandidatePoolSize
-	}
-	return poolLimit
 }
 
 func rankScore(similarity float64, hotScore int, freshness float64, hasUserVector bool) float64 {
@@ -309,9 +459,18 @@ func freshnessScore(now time.Time, publishedAt time.Time) float64 {
 	return 1 / (1 + hours/72)
 }
 
-func recommendationReason(hasUserVector bool, similarity float64, hotScore int) string {
+func recommendationReason(hasUserVector bool, similarity float64, hotScore int, recallSource string) string {
+	if recallSource == domainrecommendation.RecallSourceSimilar && similarity > 0.05 {
+		return domainrecommendation.RecallSourceSimilar
+	}
 	if hasUserVector && similarity > 0.05 {
 		return "interest_match"
+	}
+	if recallSource == domainrecommendation.RecallSourceFollowing {
+		return domainrecommendation.RecallSourceFollowing
+	}
+	if recallSource == domainrecommendation.RecallSourceCollaborative {
+		return domainrecommendation.RecallSourceCollaborative
 	}
 	if hotScore > 0 {
 		return "hot"
