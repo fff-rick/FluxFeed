@@ -133,6 +133,26 @@ var (
 		},
 	)
 
+	RecommendationRecallCandidates = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: "gcfeed",
+			Name:      "recommendation_recall_candidate_count",
+			Help:      "Candidate count returned by each recommendation recall source.",
+			Buckets:   []float64{0, 1, 5, 10, 20, 50, 100, 200, 500},
+		},
+		[]string{"source", "result"},
+	)
+
+	RecommendationRecallDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: "gcfeed",
+			Name:      "recommendation_recall_duration_seconds",
+			Help:      "Recommendation recall latency by source.",
+			Buckets:   []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1},
+		},
+		[]string{"source", "result"},
+	)
+
 	VideoUploadTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: "gcfeed",
@@ -197,12 +217,21 @@ func init() {
 		KafkaConsumerDuration,
 		OutboxEvents,
 		OutboxOldestPendingAge,
+		RecommendationRecallCandidates,
+		RecommendationRecallDuration,
 		VideoUploadTotal,
 		VideoUploadDuration,
 		VideoProcessingDuration,
 		WorkerJobsTotal,
 		WorkerJobDuration,
 	)
+}
+
+func ObserveRecommendationRecall(source string, count int, duration time.Duration, err error) {
+	source = normalizeLabel(source, "unknown")
+	result := resultLabel(err)
+	RecommendationRecallCandidates.WithLabelValues(source, result).Observe(float64(count))
+	RecommendationRecallDuration.WithLabelValues(source, result).Observe(duration.Seconds())
 }
 
 func SetOutboxStatus(pending int64, failed int64, oldestPendingAt *time.Time) {

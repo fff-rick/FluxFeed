@@ -7,6 +7,7 @@ import (
 	domaininteraction "FluxFeed/internal/domain/interaction"
 	domainvideo "FluxFeed/internal/domain/video"
 	infraoutbox "FluxFeed/internal/infra/persistence/outbox"
+	infrarecommendation "FluxFeed/internal/infra/persistence/recommendation"
 	infravideo "FluxFeed/internal/infra/persistence/video"
 	"context"
 	"errors"
@@ -189,7 +190,10 @@ func (r *Repository) SetAction(ctx context.Context, userID int64, videoID int64,
 
 		count, err = updateActionStat(tx, videoID, actionType, delta)
 		statDelta = delta
-		return err
+		if err != nil {
+			return err
+		}
+		return infrarecommendation.InvalidateUserInterest(tx, userID)
 	})
 	if err != nil {
 		return nil, 0, 0, mapVideoError(err)
@@ -235,6 +239,9 @@ func (r *Repository) CreateComment(ctx context.Context, comment *domaininteracti
 			return err
 		}
 		count = nextCount
+		if err := infrarecommendation.InvalidateUserInterest(tx, comment.UserID); err != nil {
+			return err
+		}
 		if r.outbox != nil {
 			created := domaininteraction.RestoreComment(model.ID, model.VideoID, model.UserID, "", "", model.Content, model.Status, idempotencyKeyValue(model.IdempotencyKey), model.CreatedAt, model.UpdatedAt)
 			source := applicationinteraction.NewCommentedEvent(created, count)
@@ -395,7 +402,7 @@ func (r *Repository) DeleteComment(ctx context.Context, commentID int64, userID 
 		}
 		count = nextCount
 		statDelta = -1
-		return nil
+		return infrarecommendation.InvalidateUserInterest(tx, model.UserID)
 	})
 	if err != nil {
 		return nil, 0, 0, err

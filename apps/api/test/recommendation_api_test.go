@@ -100,7 +100,7 @@ func newMemoryRecommendationRepo() *memoryRecommendationRepo {
 	}
 }
 
-func (r *memoryRecommendationRepo) ListCandidatePool(ctx context.Context, userID int64, limit int) ([]*domainrecommendation.Candidate, error) {
+func (r *memoryRecommendationRepo) ListCandidatesBySource(ctx context.Context, userID int64, source string, limit int) ([]*domainrecommendation.Candidate, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -113,6 +113,7 @@ func (r *memoryRecommendationRepo) ListCandidatePool(ctx context.Context, userID
 			continue
 		}
 		value := *item
+		value.Reason = source
 		items = append(items, &value)
 	}
 	sort.Slice(items, func(i, j int) bool {
@@ -128,6 +129,10 @@ func (r *memoryRecommendationRepo) ListCandidatePool(ctx context.Context, userID
 		items = items[:limit]
 	}
 	return items, nil
+}
+
+func (r *memoryRecommendationRepo) ListRecentPositiveVideoIDs(context.Context, int64, int) ([]int64, error) {
+	return []int64{1}, nil
 }
 
 func (r *memoryRecommendationRepo) LoadUserInterestVector(ctx context.Context, userID int64) ([]float64, bool, error) {
