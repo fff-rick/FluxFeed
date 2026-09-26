@@ -4,6 +4,7 @@ import (
 	applicationaccount "FluxFeed/internal/application/account"
 	applicationexposure "FluxFeed/internal/application/exposure"
 	applicationfeed "FluxFeed/internal/application/feed"
+	applicationgovernance "FluxFeed/internal/application/governance"
 	applicationinteraction "FluxFeed/internal/application/interaction"
 	applicationmessage "FluxFeed/internal/application/message"
 	applicationplayback "FluxFeed/internal/application/playback"
@@ -29,6 +30,7 @@ import (
 	interfaceshttpaccount "FluxFeed/internal/interfaces/http/account"
 	interfaceshttpexposure "FluxFeed/internal/interfaces/http/exposure"
 	interfaceshttpfeed "FluxFeed/internal/interfaces/http/feed"
+	interfaceshttpgovernance "FluxFeed/internal/interfaces/http/governance"
 	interfaceshttpinteraction "FluxFeed/internal/interfaces/http/interaction"
 	interfaceshttpmessage "FluxFeed/internal/interfaces/http/message"
 	interfaceshttpmiddleware "FluxFeed/internal/interfaces/http/middleware"
@@ -42,6 +44,7 @@ import (
 	"database/sql"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -51,6 +54,10 @@ import (
 
 // Register 负责后端依赖装配：数据库模型、仓储、Service、Handler、中间件和路由。
 func Register(g *gin.Engine, cfg *infraconfig.Config, db *sql.DB) error {
+	g.Use(
+		interfaceshttpmiddleware.NewRateLimit(cfg.Governance.RateLimitRPS, cfg.Governance.RateLimitBurst),
+		interfaceshttpmiddleware.NewRequestTimeout(governanceDuration(cfg.Governance.RequestTimeout, 3*time.Second)),
+	)
 	// database/sql 连接池交给 GORM 复用，避免维护两套数据库连接。
 	gormDB, err := gorm.Open(gormmysql.New(gormmysql.Config{
 		Conn: db,
@@ -79,7 +86,16 @@ func Register(g *gin.Engine, cfg *infraconfig.Config, db *sql.DB) error {
 	recommendationRepo := infrarecommendation.New(gormDB)
 	recommendationService := applicationrecommendation.New(recommendationRepo)
 	recommendationHandler := interfaceshttprecommendation.New(recommendationService)
-	feedOptions := []applicationfeed.Option{applicationfeed.WithRecommender(recommendationService)}
+	governanceSwitches := applicationgovernance.NewSwitches()
+	governanceHandler := interfaceshttpgovernance.New(governanceSwitches)
+	feedOptions := []applicationfeed.Option{
+		applicationfeed.WithRecommender(recommendationService),
+		applicationfeed.WithRecommendationTimeout(governanceDuration(cfg.Governance.RecommendationTimeout, 500*time.Millisecond)),
+		applicationfeed.WithRecommendationDegradeSwitch(func() bool {
+			enabled, _ := governanceSwitches.Enabled(applicationgovernance.SwitchRecommendationDegraded)
+			return enabled
+		}),
+	}
 	videoOptions := []applicationvideo.Option{}
 	interactionOptions := []applicationinteraction.Option{}
 	exposureOptions := []applicationexposure.Option{}
@@ -202,6 +218,8 @@ func Register(g *gin.Engine, cfg *infraconfig.Config, db *sql.DB) error {
 	api.POST("/playback-qos-reports", authMiddleware, playbackHandler.CreateQoSReport)
 
 	internal := g.Group("/internal")
+	internal.GET("/governance/degrade-switches", interfaceshttpmiddleware.NewInternalTokenAuth(cfg.Internal.Token), governanceHandler.List)
+	internal.PATCH("/governance/degrade-switches/:key", interfaceshttpmiddleware.NewInternalTokenAuth(cfg.Internal.Token), governanceHandler.Update)
 	internal.POST("/recommendation-candidates", recommendationHandler.ListCandidates)
 	internal.POST("/exposure-decisions", recommendationHandler.DecideExposures)
 	internal.POST("/exposures", recommendationHandler.SaveExposures)
@@ -218,6 +236,14 @@ func normalizedTopic(topic string, fallback string) string {
 		return fallback
 	}
 	return topic
+}
+
+func governanceDuration(raw string, fallback time.Duration) time.Duration {
+	value, err := time.ParseDuration(strings.TrimSpace(raw))
+	if err != nil || value <= 0 {
+		return fallback
+	}
+	return value
 }
 
 type applicationEventPublisher interface {

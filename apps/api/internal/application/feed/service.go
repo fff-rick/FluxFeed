@@ -23,6 +23,8 @@ const timelineFirstPageCacheTTL = 5 * time.Second
 const timelinePageCacheTTL = 45 * time.Second
 const feedCardCacheTTL = 15 * time.Minute
 const feedStatCacheTTL = 15 * time.Second
+const defaultRecommendationTimeout = 500 * time.Millisecond
+const defaultRecommendationRetryBackoff = 25 * time.Millisecond
 
 var ErrLoadFeedFailed = errors.New("failed to load feed")
 
@@ -131,6 +133,9 @@ type RecommendStrategy struct {
 	cache       FeedCache
 	recommender Recommender
 	assembler   *FeedAssembler
+	timeout     time.Duration
+	governor    *sourceGovernor
+	degraded    func() bool
 }
 
 type Recommender interface {
@@ -188,6 +193,31 @@ func WithRecommender(recommender Recommender) Option {
 			strategy.cache = s.cache
 			s.RegisterStrategy(strategy)
 		}
+	}
+}
+
+// WithRecommendationTimeout 限制个性化主召回耗时，超时后由热门和最新内容兜底。
+func WithRecommendationTimeout(timeout time.Duration) Option {
+	return func(s *Service) {
+		if timeout <= 0 {
+			return
+		}
+		s.router.Range(func(strategy Strategy) {
+			if recommend, ok := strategy.(*RecommendStrategy); ok {
+				recommend.timeout = timeout
+			}
+		})
+	}
+}
+
+// WithRecommendationDegradeSwitch 提供运维手动跳过个性化主召回的开关。
+func WithRecommendationDegradeSwitch(enabled func() bool) Option {
+	return func(s *Service) {
+		s.router.Range(func(strategy Strategy) {
+			if recommend, ok := strategy.(*RecommendStrategy); ok {
+				recommend.degraded = enabled
+			}
+		})
 	}
 }
 
@@ -355,6 +385,8 @@ func NewRecommendStrategy(repo domainfeed.Repository, recommender Recommender) *
 		repo:        repo,
 		recommender: recommender,
 		assembler:   NewFeedAssembler(repo, nil),
+		timeout:     defaultRecommendationTimeout,
+		governor:    newSourceGovernor(32, 5, 10*time.Second),
 	}
 }
 
@@ -369,8 +401,20 @@ func (s *RecommendStrategy) List(ctx context.Context, req FeedRequest) (*FeedRes
 		return nil, domainfeed.ErrViewerRequired
 	}
 	limit := normalizeLimit(req.Limit)
+	primary := governedCandidateSource{
+		primary:      NewRecommendCandidateSource(s.recommender),
+		timeout:      s.timeout,
+		governor:     s.governor,
+		degraded:     s.degraded,
+		maxRetries:   1,
+		retryBackoff: defaultRecommendationRetryBackoff,
+		fallbacks: []CandidateSource{
+			NewHotCandidateSource(s.repo, s.cache),
+			NewTimelineCandidateSource(domainfeed.SceneTimeline, s.repo),
+		},
+	}
 	sources := []CandidateSource{
-		NewRecommendCandidateSource(s.recommender),
+		primary,
 		firstPageOnlySource{optionalCandidateSource{NewHotCandidateSource(s.repo, s.cache)}},
 		firstPageOnlySource{optionalCandidateSource{NewTimelineCandidateSource(domainfeed.SceneTimeline, s.repo)}},
 		firstPageOnlySource{optionalCandidateSource{NewFollowingCandidateSource(s.repo, s.followingIndex())}},

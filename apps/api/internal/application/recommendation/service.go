@@ -161,7 +161,11 @@ func (s *Service) recallCandidates(ctx context.Context, userID int64) ([]*domain
 		domainrecommendation.RecallSourceSimilar,
 		domainrecommendation.RecallSourceCollaborative,
 	}
-	pools := make([][]*domainrecommendation.Candidate, len(sources))
+	type recallResult struct {
+		candidates []*domainrecommendation.Candidate
+		err        error
+	}
+	results := make([]recallResult, len(sources))
 	group, groupCtx := errgroup.WithContext(ctx)
 	for index, source := range sources {
 		index, source := index, source
@@ -178,15 +182,35 @@ func (s *Service) recallCandidates(ctx context.Context, userID int64) ([]*domain
 			if err == nil && source == domainrecommendation.RecallSourceSimilar {
 				candidates, err = s.personalizeSimilarRecall(groupCtx, userID, candidates)
 			}
-			if err == nil {
-				pools[index] = candidates
-			}
+			results[index] = recallResult{candidates: candidates, err: err}
 			inframetrics.ObserveRecommendationRecall(source, len(candidates), time.Since(startedAt), err)
-			return err
+			return nil
 		})
 	}
 	if err := group.Wait(); err != nil {
 		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	pools := make([][]*domainrecommendation.Candidate, len(results))
+	var firstErr error
+	successes := 0
+	for index, result := range results {
+		if result.err != nil {
+			if firstErr == nil {
+				firstErr = result.err
+			}
+			continue
+		}
+		successes++
+		pools[index] = result.candidates
+	}
+	if successes == 0 {
+		return nil, firstErr
+	}
+	if firstErr != nil {
+		inframetrics.ObserveGovernance("recommendation", "partial_recall")
 	}
 	return mergeRecallPools(pools), nil
 }
@@ -196,8 +220,15 @@ func (s *Service) personalizeInterestRecall(ctx context.Context, userID int64, c
 		return candidates, nil
 	}
 	userVector, ok, err := s.repo.LoadUserInterestVector(ctx, userID)
-	if err != nil || !ok {
-		return candidates[:min(len(candidates), recallPerSource)], err
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, err
+		}
+		inframetrics.ObserveGovernance("recommendation", "default_profile")
+		return candidates[:min(len(candidates), recallPerSource)], nil
+	}
+	if !ok {
+		return candidates[:min(len(candidates), recallPerSource)], nil
 	}
 	videoIDs := make([]int64, 0, len(candidates))
 	for _, candidate := range candidates {
@@ -207,7 +238,11 @@ func (s *Service) personalizeInterestRecall(ctx context.Context, userID int64, c
 	}
 	vectors, err := s.repo.LoadVideoVectors(ctx, videoIDs)
 	if err != nil {
-		return nil, err
+		if ctx.Err() != nil {
+			return nil, err
+		}
+		inframetrics.ObserveGovernance("recommendation", "interest_vector_fallback")
+		return candidates[:min(len(candidates), recallPerSource)], nil
 	}
 	return selectBySimilarity(userVector, candidates, vectors, 0, recallPerSource), nil
 }
@@ -217,8 +252,15 @@ func (s *Service) personalizeSimilarRecall(ctx context.Context, userID int64, ca
 		return candidates, nil
 	}
 	seedIDs, err := s.repo.ListRecentPositiveVideoIDs(ctx, userID, 1)
-	if err != nil || len(seedIDs) == 0 {
-		return []*domainrecommendation.Candidate{}, err
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, err
+		}
+		inframetrics.ObserveGovernance("recommendation", "similar_seed_fallback")
+		return []*domainrecommendation.Candidate{}, nil
+	}
+	if len(seedIDs) == 0 {
+		return []*domainrecommendation.Candidate{}, nil
 	}
 	videoIDs := make([]int64, 0, len(candidates)+1)
 	videoIDs = append(videoIDs, seedIDs[0])
@@ -229,7 +271,11 @@ func (s *Service) personalizeSimilarRecall(ctx context.Context, userID int64, ca
 	}
 	vectors, err := s.repo.LoadVideoVectors(ctx, videoIDs)
 	if err != nil {
-		return nil, err
+		if ctx.Err() != nil {
+			return nil, err
+		}
+		inframetrics.ObserveGovernance("recommendation", "similar_vector_fallback")
+		return []*domainrecommendation.Candidate{}, nil
 	}
 	return selectBySimilarity(vectors[seedIDs[0]], candidates, vectors, seedIDs[0], recallPerSource), nil
 }
@@ -397,11 +443,20 @@ func (s *Service) rankCandidates(ctx context.Context, userID int64, pool []*doma
 	}
 	vectors, err := s.repo.LoadVideoVectors(ctx, videoIDs)
 	if err != nil {
-		return nil, err
+		if ctx.Err() != nil {
+			return nil, err
+		}
+		inframetrics.ObserveGovernance("recommendation", "rank_vector_fallback")
+		vectors = map[int64][]float64{}
 	}
 	userVector, hasUserVector, err := s.repo.LoadUserInterestVector(ctx, userID)
 	if err != nil {
-		return nil, err
+		if ctx.Err() != nil {
+			return nil, err
+		}
+		inframetrics.ObserveGovernance("recommendation", "default_profile")
+		userVector = nil
+		hasUserVector = false
 	}
 
 	now := s.now()
