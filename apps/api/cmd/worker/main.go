@@ -19,6 +19,7 @@ import (
 	infradatabase "FluxFeed/internal/infra/database"
 	inframetrics "FluxFeed/internal/infra/metrics"
 	inframq "FluxFeed/internal/infra/mq"
+	infraobservability "FluxFeed/internal/infra/observability"
 	infraembedding "FluxFeed/internal/infra/persistence/embedding"
 	infraeventbus "FluxFeed/internal/infra/persistence/eventbus"
 	infrafeed "FluxFeed/internal/infra/persistence/feed"
@@ -34,6 +35,12 @@ import (
 const configPath = "./configs/config.yaml"
 
 func main() {
+	infraobservability.ConfigureLogging("fluxfeed-worker")
+	shutdownTracing, err := infraobservability.ConfigureTracing(context.Background(), "fluxfeed-worker")
+	if err != nil {
+		log.Fatalf("init tracing failed: %v", err)
+	}
+	defer shutdownTracer(shutdownTracing)
 	cfg, err := infraconfig.LoadConfig(configPath)
 	if err != nil {
 		log.Fatalf("load config failed: %v", err)
@@ -47,6 +54,9 @@ func main() {
 		log.Fatalf("init database failed: %v", err)
 	}
 	defer closeSQL(sqlDB)
+	if err := inframetrics.RegisterDatabase(sqlDB); err != nil {
+		log.Fatalf("register database metrics failed: %v", err)
+	}
 
 	gormDB, err := gorm.Open(gormmysql.New(gormmysql.Config{Conn: sqlDB}), &gorm.Config{})
 	if err != nil {
@@ -76,6 +86,14 @@ func main() {
 	log.Println("gcfeed worker is running")
 	<-ctx.Done()
 	log.Println("gcfeed worker stopped")
+}
+
+func shutdownTracer(shutdown func(context.Context) error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := shutdown(ctx); err != nil {
+		log.Printf("shutdown tracing failed: %v", err)
+	}
 }
 
 type workerEventBus interface {

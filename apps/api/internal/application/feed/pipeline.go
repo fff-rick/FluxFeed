@@ -2,8 +2,10 @@ package applicationfeed
 
 import (
 	domainfeed "FluxFeed/internal/domain/feed"
+	inframetrics "FluxFeed/internal/infra/metrics"
 	"context"
 	"sort"
+	"time"
 
 	"golang.org/x/sync/singleflight"
 )
@@ -38,19 +40,23 @@ func (AppendCandidateMerger) Merge(_ context.Context, _ FeedRequest, pages []*Fe
 
 type DeduplicateFilter struct{}
 
-func (DeduplicateFilter) Filter(_ context.Context, _ FeedRequest, items []*domainfeed.FeedPageItem) []*domainfeed.FeedPageItem {
+func (DeduplicateFilter) Filter(_ context.Context, req FeedRequest, items []*domainfeed.FeedPageItem) []*domainfeed.FeedPageItem {
 	result := make([]*domainfeed.FeedPageItem, 0, len(items))
 	seen := make(map[int64]struct{}, len(items))
+	valid, duplicates := 0, 0
 	for _, item := range items {
 		if item == nil || item.VideoID <= 0 {
 			continue
 		}
+		valid++
 		if _, ok := seen[item.VideoID]; ok {
+			duplicates++
 			continue
 		}
 		seen[item.VideoID] = struct{}{}
 		result = append(result, item)
 	}
+	inframetrics.ObserveFeedDedup(string(req.Scene), valid, duplicates)
 	return result
 }
 
@@ -167,7 +173,9 @@ func (p *CandidatePipeline) Run(ctx context.Context, req FeedRequest, pages []*F
 		}
 	}
 	if p.Ranker != nil {
+		startedAt := time.Now()
 		items = p.Ranker.Rank(ctx, req, items)
+		inframetrics.ObserveFeedRank(string(req.Scene), time.Since(startedAt))
 	}
 	for _, mixer := range p.Mixers {
 		if mixer != nil {

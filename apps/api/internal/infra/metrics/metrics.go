@@ -2,6 +2,7 @@ package inframetrics
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"net/http"
 	"strconv"
@@ -61,6 +62,60 @@ var (
 		[]string{"scene"},
 	)
 
+	FeedEmptyRequestsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "gcfeed",
+			Name:      "feed_empty_requests_total",
+			Help:      "Successful feed requests that returned no items.",
+		},
+		[]string{"scene"},
+	)
+
+	FeedCandidateItemsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "gcfeed",
+			Name:      "feed_candidate_items_total",
+			Help:      "Valid feed candidates entering deduplication.",
+		},
+		[]string{"scene"},
+	)
+
+	FeedDuplicateItemsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "gcfeed",
+			Name:      "feed_duplicate_items_total",
+			Help:      "Duplicate feed candidates removed by deduplication.",
+		},
+		[]string{"scene"},
+	)
+
+	FeedRankLatency = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: "gcfeed",
+			Name:      "feed_rank_latency_seconds",
+			Help:      "Feed ranking latency in seconds by scene.",
+			Buckets:   []float64{0.0001, 0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25},
+		},
+		[]string{"scene"},
+	)
+
+	FeedFanoutLatency = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Namespace: "gcfeed",
+			Name:      "feed_fanout_latency_seconds",
+			Help:      "Feed fanout processing latency in seconds.",
+			Buckets:   []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10},
+		},
+	)
+
+	FeedFanoutFailureTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Namespace: "gcfeed",
+			Name:      "feed_fanout_failure_total",
+			Help:      "Feed fanout operations that failed.",
+		},
+	)
+
 	FeedCacheRequestsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: "gcfeed",
@@ -114,6 +169,15 @@ var (
 			Buckets:   []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30},
 		},
 		[]string{"group", "event_type", "result"},
+	)
+
+	KafkaConsumerLag = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: "gcfeed",
+			Name:      "kafka_consumer_lag",
+			Help:      "Kafka consumer lag by group, topic and partition.",
+		},
+		[]string{"group", "topic", "partition"},
 	)
 
 	OutboxEvents = prometheus.NewGaugeVec(
@@ -218,12 +282,19 @@ func init() {
 		FeedRequestsTotal,
 		FeedRequestDuration,
 		FeedItemsTotal,
+		FeedEmptyRequestsTotal,
+		FeedCandidateItemsTotal,
+		FeedDuplicateItemsTotal,
+		FeedRankLatency,
+		FeedFanoutLatency,
+		FeedFanoutFailureTotal,
 		FeedCacheRequestsTotal,
 		FeedCacheWritesTotal,
 		EventBusEventsTotal,
 		KafkaConsumerRetriesTotal,
 		KafkaDLQEventsTotal,
 		KafkaConsumerDuration,
+		KafkaConsumerLag,
 		OutboxEvents,
 		OutboxOldestPendingAge,
 		RecommendationRecallCandidates,
@@ -276,6 +347,35 @@ func ObserveKafkaConsumer(group string, eventType string, duration time.Duration
 	KafkaConsumerDuration.WithLabelValues(normalizeLabel(group, "unknown"), normalizeLabel(eventType, "unknown"), resultLabel(err)).Observe(duration.Seconds())
 }
 
+func ObserveKafkaConsumerLag(group string, topic string, partition int32, lag int64) {
+	if lag < 0 {
+		lag = 0
+	}
+	KafkaConsumerLag.WithLabelValues(
+		normalizeLabel(group, "unknown"),
+		normalizeLabel(topic, "unknown"),
+		strconv.FormatInt(int64(partition), 10),
+	).Set(float64(lag))
+}
+
+// RegisterDatabase exposes database/sql pool state without a polling goroutine.
+func RegisterDatabase(db *sql.DB) error {
+	collectors := []prometheus.Collector{
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{Namespace: "gcfeed", Name: "mysql_connections_open", Help: "Current open MySQL connections."}, func() float64 { return float64(db.Stats().OpenConnections) }),
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{Namespace: "gcfeed", Name: "mysql_connections_in_use", Help: "Current MySQL connections in use."}, func() float64 { return float64(db.Stats().InUse) }),
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{Namespace: "gcfeed", Name: "mysql_connections_idle", Help: "Current idle MySQL connections."}, func() float64 { return float64(db.Stats().Idle) }),
+		prometheus.NewGaugeFunc(prometheus.GaugeOpts{Namespace: "gcfeed", Name: "mysql_connections_max_open", Help: "Configured maximum open MySQL connections."}, func() float64 { return float64(db.Stats().MaxOpenConnections) }),
+		prometheus.NewCounterFunc(prometheus.CounterOpts{Namespace: "gcfeed", Name: "mysql_connection_wait_total", Help: "Total waits for a free MySQL connection."}, func() float64 { return float64(db.Stats().WaitCount) }),
+		prometheus.NewCounterFunc(prometheus.CounterOpts{Namespace: "gcfeed", Name: "mysql_connection_wait_duration_seconds_total", Help: "Total time blocked waiting for a MySQL connection."}, func() float64 { return db.Stats().WaitDuration.Seconds() }),
+	}
+	for _, collector := range collectors {
+		if err := prometheus.Register(collector); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // HTTPMiddleware records request count and latency with stable route labels.
 func HTTPMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -325,6 +425,30 @@ func ObserveFeed(scene string, duration time.Duration, itemCount int, err error)
 	FeedRequestDuration.WithLabelValues(scene, result).Observe(duration.Seconds())
 	if err == nil && itemCount > 0 {
 		FeedItemsTotal.WithLabelValues(scene).Add(float64(itemCount))
+	}
+	if err == nil && itemCount == 0 {
+		FeedEmptyRequestsTotal.WithLabelValues(scene).Inc()
+	}
+}
+
+func ObserveFeedDedup(scene string, candidates int, duplicates int) {
+	scene = normalizeLabel(scene, "unknown")
+	if candidates > 0 {
+		FeedCandidateItemsTotal.WithLabelValues(scene).Add(float64(candidates))
+	}
+	if duplicates > 0 {
+		FeedDuplicateItemsTotal.WithLabelValues(scene).Add(float64(duplicates))
+	}
+}
+
+func ObserveFeedRank(scene string, duration time.Duration) {
+	FeedRankLatency.WithLabelValues(normalizeLabel(scene, "unknown")).Observe(duration.Seconds())
+}
+
+func ObserveFeedFanout(duration time.Duration, err error) {
+	FeedFanoutLatency.Observe(duration.Seconds())
+	if err != nil {
+		FeedFanoutFailureTotal.Inc()
 	}
 }
 

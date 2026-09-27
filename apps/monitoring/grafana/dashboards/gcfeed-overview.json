@@ -50,6 +50,7 @@
         "y": 0
       },
       "id": 1,
+      "description": "按路由展示 API 每秒请求量，用于观察入口流量变化。",
       "options": {
         "legend": {
           "displayMode": "list",
@@ -68,7 +69,7 @@
           "refId": "A"
         }
       ],
-      "title": "API QPS",
+      "title": "API 请求速率",
       "type": "timeseries"
     },
     {
@@ -105,6 +106,7 @@
         "y": 0
       },
       "id": 2,
+      "description": "全部 API 请求中 5xx 响应的比例，超过 1% 显示红色。",
       "options": {
         "legend": {
           "displayMode": "list",
@@ -123,7 +125,7 @@
           "refId": "A"
         }
       ],
-      "title": "API 5xx Error Rate",
+      "title": "API 5xx 错误率",
       "type": "timeseries"
     },
     {
@@ -153,6 +155,7 @@
         "y": 0
       },
       "id": 3,
+      "description": "按路由展示最近 5 分钟 HTTP 请求耗时的 P95。",
       "options": {
         "legend": {
           "displayMode": "list",
@@ -171,7 +174,7 @@
           "refId": "A"
         }
       ],
-      "title": "API P95 Latency",
+      "title": "API P95 延迟",
       "type": "timeseries"
     },
     {
@@ -195,6 +198,7 @@
         "y": 8
       },
       "id": 4,
+      "description": "按 Feed 场景展示最近 5 分钟请求耗时的 P95。",
       "options": {
         "legend": {
           "displayMode": "list",
@@ -213,7 +217,7 @@
           "refId": "A"
         }
       ],
-      "title": "Feed P95 Latency",
+      "title": "Feed P95 延迟",
       "type": "timeseries"
     },
     {
@@ -237,6 +241,7 @@
         "y": 8
       },
       "id": 5,
+      "description": "按缓存区域展示命中数占有效读取数的比例。",
       "options": {
         "legend": {
           "displayMode": "list",
@@ -255,7 +260,7 @@
           "refId": "A"
         }
       ],
-      "title": "Feed Cache Hit Rate",
+      "title": "Feed 缓存命中率",
       "type": "timeseries"
     },
     {
@@ -279,6 +284,7 @@
         "y": 16
       },
       "id": 6,
+      "description": "上传与视频处理各步骤最近 5 分钟耗时的 P95。",
       "options": {
         "legend": {
           "displayMode": "list",
@@ -302,7 +308,7 @@
           "refId": "B"
         }
       ],
-      "title": "Upload and Video Processing P95",
+      "title": "上传与视频处理 P95",
       "type": "timeseries"
     },
     {
@@ -326,6 +332,7 @@
         "y": 16
       },
       "id": 7,
+      "description": "按任务展示 Worker 成功处理数占总处理数的比例。",
       "options": {
         "legend": {
           "displayMode": "list",
@@ -344,7 +351,172 @@
           "refId": "A"
         }
       ],
-      "title": "Worker Success Rate",
+      "title": "Worker 成功率",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "description": "成功 Feed 请求中未返回任何内容的比例。",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 0.05}, {"color": "red", "value": 0.15}]},
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
+      "id": 8,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "single", "sort": "none"}},
+      "targets": [{"expr": "sum(rate(gcfeed_feed_empty_requests_total[5m])) by (scene) / clamp_min(sum(rate(gcfeed_feed_requests_total{result=\"success\"}[5m])) by (scene), 0.001)", "legendFormat": "{{scene}}", "refId": "A"}],
+      "title": "Feed 空结果率",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "description": "进入去重环节的候选中被判定为重复项的比例。",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 0.1}, {"color": "red", "value": 0.3}]},
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
+      "id": 9,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "single", "sort": "none"}},
+      "targets": [{"expr": "sum(rate(gcfeed_feed_duplicate_items_total[5m])) by (scene) / clamp_min(sum(rate(gcfeed_feed_candidate_items_total[5m])) by (scene), 0.001)", "legendFormat": "{{scene}}", "refId": "A"}],
+      "title": "Feed 候选重复率",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "description": "各召回源返回的候选数量 P95，便于发现召回结果骤降。",
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 32},
+      "id": 10,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "single", "sort": "none"}},
+      "targets": [{"expr": "histogram_quantile(0.95, sum(rate(gcfeed_recommendation_recall_candidate_count_bucket[5m])) by (le, source))", "legendFormat": "{{source}}", "refId": "A"}],
+      "title": "推荐召回候选数 P95",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "description": "召回与 Feed 排序最近 5 分钟耗时的 P95。",
+      "fieldConfig": {
+        "defaults": {"color": {"mode": "palette-classic"}, "unit": "s"},
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 32},
+      "id": 11,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "single", "sort": "none"}},
+      "targets": [
+        {"expr": "histogram_quantile(0.95, sum(rate(gcfeed_recommendation_recall_duration_seconds_bucket[5m])) by (le, source))", "legendFormat": "召回 {{source}}", "refId": "A"},
+        {"expr": "histogram_quantile(0.95, sum(rate(gcfeed_feed_rank_latency_seconds_bucket[5m])) by (le, scene))", "legendFormat": "排序 {{scene}}", "refId": "B"}
+      ],
+      "title": "推荐召回与排序 P95",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "description": "Kafka 消费重试和进入死信队列的事件速率。",
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "unit": "ops"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 40},
+      "id": 12,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "single", "sort": "none"}},
+      "targets": [
+        {"expr": "sum(rate(gcfeed_kafka_consumer_retries_total[5m])) by (group, event_type)", "legendFormat": "重试 {{group}} / {{event_type}}", "refId": "A"},
+        {"expr": "sum(rate(gcfeed_kafka_dlq_events_total[5m])) by (group, event_type)", "legendFormat": "死信 {{group}} / {{event_type}}", "refId": "B"}
+      ],
+      "title": "Kafka 重试与死信速率",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "description": "当前待发送、失败的 Outbox 事件数量。",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 10}, {"color": "red", "value": 100}]},
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 6, "x": 12, "y": 40},
+      "id": 13,
+      "options": {"colorMode": "background", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"expr": "sum(gcfeed_outbox_events) by (status)", "legendFormat": "{{status}}", "refId": "A"}],
+      "title": "Outbox 积压",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "description": "最老待发送 Outbox 事件的当前等待时长。",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 30}, {"color": "red", "value": 120}]},
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 6, "x": 18, "y": 40},
+      "id": 14,
+      "options": {"colorMode": "background", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"expr": "gcfeed_outbox_oldest_pending_age_seconds", "legendFormat": "等待时长", "refId": "A"}],
+      "title": "Outbox 最老事件",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "description": "Feed Fanout 最近 5 分钟耗时 P95 与失败速率。",
+      "fieldConfig": {
+        "defaults": {"color": {"mode": "palette-classic"}, "unit": "s"},
+        "overrides": [{"matcher": {"id": "byName", "options": "失败/秒"}, "properties": [{"id": "unit", "value": "ops"}]}]
+      },
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 48},
+      "id": 15,
+      "options": {"legend": {"displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "single", "sort": "none"}},
+      "targets": [
+        {"expr": "histogram_quantile(0.95, sum(rate(gcfeed_feed_fanout_latency_seconds_bucket[5m])) by (le))", "legendFormat": "P95 延迟", "refId": "A"},
+        {"expr": "sum(rate(gcfeed_feed_fanout_failure_total[5m]))", "legendFormat": "失败/秒", "refId": "B"}
+      ],
+      "title": "Feed Fanout 延迟与失败",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "description": "按消费组、Topic 和分区展示当前 Kafka 消费积压。",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 100}, {"color": "red", "value": 1000}]},
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 56},
+      "id": 16,
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "single", "sort": "none"}},
+      "targets": [{"expr": "max(gcfeed_kafka_consumer_lag) by (group, topic, partition)", "legendFormat": "{{group}} / {{topic}} / P{{partition}}", "refId": "A"}],
+      "title": "Kafka 消费积压",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "description": "按进程展示 MySQL 连接池的打开、使用中、空闲与上限连接数。",
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "min": 0, "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 56},
+      "id": 17,
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "single", "sort": "none"}},
+      "targets": [
+        {"expr": "gcfeed_mysql_connections_open", "legendFormat": "{{job}} 打开", "refId": "A"},
+        {"expr": "gcfeed_mysql_connections_in_use", "legendFormat": "{{job}} 使用中", "refId": "B"},
+        {"expr": "gcfeed_mysql_connections_idle", "legendFormat": "{{job}} 空闲", "refId": "C"},
+        {"expr": "gcfeed_mysql_connections_max_open", "legendFormat": "{{job}} 上限", "refId": "D"}
+      ],
+      "title": "MySQL 连接池",
       "type": "timeseries"
     }
   ],
@@ -363,8 +535,8 @@
   },
   "timepicker": {},
   "timezone": "browser",
-  "title": "FluxFeed Overview",
+  "title": "01 Feed 总览",
   "uid": "fluxfeed-overview",
-  "version": 1,
+  "version": 4,
   "weekStart": ""
 }

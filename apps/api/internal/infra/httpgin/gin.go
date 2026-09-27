@@ -3,6 +3,7 @@ package infrahttpgin
 import (
 	infraconfig "FluxFeed/internal/infra/config"
 	inframetrics "FluxFeed/internal/infra/metrics"
+	infraobservability "FluxFeed/internal/infra/observability"
 	"context"
 	"errors"
 	"net/http"
@@ -11,13 +12,14 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"go.opentelemetry.io/contrib/instrumentation/github.com/gin-gonic/gin/otelgin"
 )
 
-// Init 创建 Gin 引擎，并使用默认日志和恢复中间件。
+// Init 创建 Gin 引擎，并注册恢复、结构化访问日志和指标中间件。
 func Init() *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
-	g := gin.Default()
-	g.Use(inframetrics.HTTPMiddleware())
+	g := gin.New()
+	g.Use(otelgin.Middleware("fluxfeed-api"), infraobservability.HTTPMiddleware(nil), inframetrics.HTTPMiddleware(), gin.Recovery())
 	return g
 }
 

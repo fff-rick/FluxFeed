@@ -83,11 +83,16 @@ services:
         condition: service_healthy
       kafka:
         condition: service_healthy
+      tempo:
+        condition: service_started
     ports:
       - "8080:8080"
     volumes:
       - ./api/configs/config.docker.yaml:/app/configs/config.yaml:ro
       - api_uploads:/app/uploads
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4317
+      OTEL_EXPORTER_OTLP_INSECURE: "true"
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/health >/dev/null"]
       interval: 10s
@@ -110,8 +115,13 @@ services:
         condition: service_healthy
       kafka:
         condition: service_healthy
+      tempo:
+        condition: service_started
     volumes:
       - ./api/configs/config.docker.yaml:/app/configs/config.yaml:ro
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4317
+      OTEL_EXPORTER_OTLP_INSECURE: "true"
 
   web:
     build:
@@ -139,11 +149,22 @@ services:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.path=/prometheus"
 
+  tempo:
+    image: grafana/tempo:3.0.3
+    container_name: fluxfeed-tempo
+    command: ["-config.file=/etc/tempo.yml"]
+    ports:
+      - "3200:3200"
+    volumes:
+      - ./monitoring/tempo.yml:/etc/tempo.yml:ro
+      - tempo_data:/var/tempo
+
   grafana:
     image: grafana/grafana:11.4.0
     container_name: fluxfeed-grafana
     depends_on:
       - prometheus
+      - tempo
     ports:
       - "3000:3000"
     environment:
@@ -166,3 +187,4 @@ volumes:
   api_uploads:
   prometheus_data:
   grafana_data:
+  tempo_data:

@@ -1,0 +1,42 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "graphTooltip": 1,
+  "id": null,
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "description": "Feed Fanout 处理耗时的 P50、P95 与 P99。",
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "min": 0, "unit": "s"}, "overrides": []},
+      "gridPos": {"h": 9, "w": 16, "x": 0, "y": 0},
+      "id": 1,
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum(rate(gcfeed_feed_fanout_latency_seconds_bucket[5m])) by (le))", "legendFormat": "P50", "refId": "A"},
+        {"expr": "histogram_quantile(0.95, sum(rate(gcfeed_feed_fanout_latency_seconds_bucket[5m])) by (le))", "legendFormat": "P95", "refId": "B"},
+        {"expr": "histogram_quantile(0.99, sum(rate(gcfeed_feed_fanout_latency_seconds_bucket[5m])) by (le))", "legendFormat": "P99", "refId": "C"}
+      ],
+      "title": "Feed Fanout 延迟分位数",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "description": "最近 5 分钟 Feed Fanout 每秒失败次数。",
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "min": 0, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 0.01}, {"color": "red", "value": 0.1}]}, "unit": "ops"}, "overrides": []},
+      "gridPos": {"h": 9, "w": 8, "x": 16, "y": 0},
+      "id": 2,
+      "options": {"colorMode": "background", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"expr": "sum(rate(gcfeed_feed_fanout_failure_total[5m]))", "legendFormat": "失败/秒", "refId": "A"}],
+      "title": "Feed Fanout 当前失败速率",
+      "type": "stat"
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 40,
+  "tags": ["fluxfeed", "分发"],
+  "time": {"from": "now-30m", "to": "now"},
+  "timezone": "browser",
+  "title": "06 Feed Fanout",
+  "uid": "fluxfeed-fanout",
+  "version": 1
+}

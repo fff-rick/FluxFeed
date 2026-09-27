@@ -6,11 +6,27 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/twmb/franz-go/pkg/kgo"
 )
 
 type memoryDeduplicator struct {
 	processed bool
 	marked    int
+}
+
+func TestKafkaHeaderCarrierUpdatesAndReadsHeaders(t *testing.T) {
+	record := &kgo.Record{Headers: []kgo.RecordHeader{{Key: "traceparent", Value: []byte("old")}}}
+	carrier := kafkaHeaderCarrier{record: record}
+	carrier.Set("TraceParent", "new")
+	carrier.Set("tracestate", "state")
+
+	if got := carrier.Get("traceparent"); got != "new" {
+		t.Fatalf("traceparent = %q, want new", got)
+	}
+	if len(carrier.Keys()) != 2 {
+		t.Fatalf("header count = %d, want 2", len(carrier.Keys()))
+	}
 }
 
 func (d *memoryDeduplicator) IsProcessed(context.Context, string, string) (bool, error) {
