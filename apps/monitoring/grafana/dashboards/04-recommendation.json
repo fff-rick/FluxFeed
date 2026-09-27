@@ -1,0 +1,52 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "graphTooltip": 1,
+  "id": null,
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "description": "各召回源返回候选数量的 P50 与 P95。",
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "min": 0, "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 0},
+      "id": 1,
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum(rate(gcfeed_recommendation_recall_candidate_count_bucket[5m])) by (le, source))", "legendFormat": "{{source}} P50", "refId": "A"},
+        {"expr": "histogram_quantile(0.95, sum(rate(gcfeed_recommendation_recall_candidate_count_bucket[5m])) by (le, source))", "legendFormat": "{{source}} P95", "refId": "B"}
+      ],
+      "title": "推荐召回候选数量",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "description": "各召回源最近 5 分钟延迟 P95。",
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "min": 0, "unit": "s"}, "overrides": []},
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 0},
+      "id": 2,
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "single", "sort": "none"}},
+      "targets": [{"expr": "histogram_quantile(0.95, sum(rate(gcfeed_recommendation_recall_duration_seconds_bucket[5m])) by (le, source))", "legendFormat": "{{source}}", "refId": "A"}],
+      "title": "推荐召回 P95 延迟",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "description": "推荐降级、排序回退等治理决策的发生速率。",
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "min": 0, "unit": "ops"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 9},
+      "id": 3,
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"expr": "sum(rate(gcfeed_governance_events_total{component=\"recommendation\"}[5m])) by (decision)", "legendFormat": "{{decision}}", "refId": "A"}],
+      "title": "推荐治理决策速率",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 40,
+  "tags": ["fluxfeed", "推荐"],
+  "time": {"from": "now-30m", "to": "now"},
+  "timezone": "browser",
+  "title": "04 推荐系统",
+  "uid": "fluxfeed-recommendation",
+  "version": 1
+}

@@ -5,16 +5,25 @@ import (
 	"log"
 	"os/signal"
 	"syscall"
+	"time"
 
 	infraconfig "FluxFeed/internal/infra/config"
 	infradatabase "FluxFeed/internal/infra/database"
 	infrahttpgin "FluxFeed/internal/infra/httpgin"
+	inframetrics "FluxFeed/internal/infra/metrics"
+	infraobservability "FluxFeed/internal/infra/observability"
 	interfaceshttprouter "FluxFeed/internal/interfaces/http/router"
 )
 
 const configPath = "./configs/config.yaml"
 
 func main() {
+	infraobservability.ConfigureLogging("fluxfeed-api")
+	shutdownTracing, err := infraobservability.ConfigureTracing(context.Background(), "fluxfeed-api")
+	if err != nil {
+		log.Fatalf("init tracing failed: %v", err)
+	}
+	defer shutdownTracer(shutdownTracing)
 	// 启动顺序保持简单：配置 -> 数据库 -> Gin -> 路由 -> 启动服务。
 	cfg, err := infraconfig.LoadConfig(configPath)
 	if err != nil {
@@ -35,6 +44,9 @@ func main() {
 		log.Fatalf("init database failed: %v", err)
 	}
 	defer db.Close()
+	if err := inframetrics.RegisterDatabase(db); err != nil {
+		log.Fatalf("register database metrics failed: %v", err)
+	}
 	log.Println("database connection initialized")
 
 	// Gin 引擎只负责 HTTP 入口，业务依赖在 router.Register 中装配。
@@ -56,4 +68,12 @@ func main() {
 		log.Fatalf("run server failed: %v", err)
 	}
 	log.Println("server stopped")
+}
+
+func shutdownTracer(shutdown func(context.Context) error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := shutdown(ctx); err != nil {
+		log.Printf("shutdown tracing failed: %v", err)
+	}
 }

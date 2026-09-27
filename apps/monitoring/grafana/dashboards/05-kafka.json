@@ -1,0 +1,52 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "graphTooltip": 1,
+  "id": null,
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "description": "按消费组、Topic 和分区展示当前消费积压。",
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "min": 0, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 100}, {"color": "red", "value": 1000}]}, "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 9, "w": 24, "x": 0, "y": 0},
+      "id": 1,
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "single", "sort": "none"}},
+      "targets": [{"expr": "max(gcfeed_kafka_consumer_lag) by (group, topic, partition)", "legendFormat": "{{group}} / {{topic}} / P{{partition}}", "refId": "A"}],
+      "title": "Kafka 消费积压",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "description": "按消费组与事件类型展示处理耗时 P95。",
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "min": 0, "unit": "s"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 9},
+      "id": 2,
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "single", "sort": "none"}},
+      "targets": [{"expr": "histogram_quantile(0.95, sum(rate(gcfeed_kafka_consumer_processing_duration_seconds_bucket[5m])) by (le, group, event_type))", "legendFormat": "{{group}} / {{event_type}}", "refId": "A"}],
+      "title": "Kafka 消费处理 P95 延迟",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "description": "消费重试与进入死信队列的事件速率。",
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "min": 0, "unit": "ops"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 9},
+      "id": 3,
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "sum(rate(gcfeed_kafka_consumer_retries_total[5m])) by (group, event_type)", "legendFormat": "重试 {{group}} / {{event_type}}", "refId": "A"},
+        {"expr": "sum(rate(gcfeed_kafka_dlq_events_total[5m])) by (group, event_type)", "legendFormat": "死信 {{group}} / {{event_type}}", "refId": "B"}
+      ],
+      "title": "Kafka 重试与死信",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 40,
+  "tags": ["fluxfeed", "消息队列"],
+  "time": {"from": "now-30m", "to": "now"},
+  "timezone": "browser",
+  "title": "05 Kafka 消息队列",
+  "uid": "fluxfeed-kafka",
+  "version": 1
+}

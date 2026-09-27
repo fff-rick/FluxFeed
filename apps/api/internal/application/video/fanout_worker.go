@@ -114,7 +114,9 @@ func (w *FanoutWorker) Start(ctx context.Context) error {
 func (w *FanoutWorker) HandleVideoPublished(ctx context.Context, event *PublishedEvent) (err error) {
 	start := time.Now()
 	defer func() {
-		inframetrics.ObserveWorkerJob("video_fanout", time.Since(start), err)
+		duration := time.Since(start)
+		inframetrics.ObserveWorkerJob("video_fanout", duration, err)
+		inframetrics.ObserveFeedFanout(duration, err)
 	}()
 
 	if event == nil || event.VideoID <= 0 || event.AuthorID <= 0 {

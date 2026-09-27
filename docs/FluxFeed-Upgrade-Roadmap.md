@@ -537,6 +537,21 @@ Redis 异常     → Local Cache / DB
 
 ## Stage 10：可观测性
 
+**状态：已完成。**
+
+第一批已完成：补齐 Feed 空结果、候选重复、排序和 Fanout 指标，接入带
+Request ID 的 JSON 结构化访问日志，并将 Grafana 总览升级为覆盖 API、Feed、
+缓存、推荐、Kafka、Outbox 与 Fanout 的中文监控面板。
+
+第二批已完成：接入 HTTP 与 Kafka 跨进程 OpenTelemetry Trace，访问日志关联
+Trace ID；补充 Kafka consumer lag 和 MySQL 连接池指标及 Grafana 面板。配置
+`OTEL_EXPORTER_OTLP_ENDPOINT` 后，API 与 Worker 会通过 OTLP/gRPC 导出链路，
+未配置时自动禁用 Trace 导出。
+
+第三批已完成：Compose 内置 Tempo 单体 Trace 后端并自动为 API、Worker 配置
+OTLP 导出，Grafana provision Tempo 数据源；按路线图拆分为 Feed 总览、延迟、
+缓存、推荐、Kafka、Fanout、MySQL、错误与异常 8 个中文专题看板。
+
 ### 目标
 
 建立完整的 Feed Observability。

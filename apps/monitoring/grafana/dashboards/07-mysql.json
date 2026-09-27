@@ -1,0 +1,54 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "graphTooltip": 1,
+  "id": null,
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "description": "按进程展示 MySQL 连接池打开、使用中、空闲与上限连接数。",
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "min": 0, "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 9, "w": 24, "x": 0, "y": 0},
+      "id": 1,
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [
+        {"expr": "gcfeed_mysql_connections_open", "legendFormat": "{{job}} 打开", "refId": "A"},
+        {"expr": "gcfeed_mysql_connections_in_use", "legendFormat": "{{job}} 使用中", "refId": "B"},
+        {"expr": "gcfeed_mysql_connections_idle", "legendFormat": "{{job}} 空闲", "refId": "C"},
+        {"expr": "gcfeed_mysql_connections_max_open", "legendFormat": "{{job}} 上限", "refId": "D"}
+      ],
+      "title": "MySQL 连接池状态",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "description": "等待可用数据库连接的发生速率，持续大于零表示连接池可能饱和。",
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "min": 0, "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 0.1}, {"color": "red", "value": 1}]}, "unit": "ops"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 9},
+      "id": 2,
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "single", "sort": "none"}},
+      "targets": [{"expr": "sum(rate(gcfeed_mysql_connection_wait_total[5m])) by (job)", "legendFormat": "{{job}}", "refId": "A"}],
+      "title": "MySQL 连接等待速率",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "description": "每秒累计的数据库连接等待时间。",
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "min": 0, "unit": "s"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 9},
+      "id": 3,
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "single", "sort": "none"}},
+      "targets": [{"expr": "sum(rate(gcfeed_mysql_connection_wait_duration_seconds_total[5m])) by (job)", "legendFormat": "{{job}}", "refId": "A"}],
+      "title": "MySQL 连接等待耗时速率",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 40,
+  "tags": ["fluxfeed", "数据库"],
+  "time": {"from": "now-30m", "to": "now"},
+  "timezone": "browser",
+  "title": "07 MySQL 数据库",
+  "uid": "fluxfeed-mysql",
+  "version": 1
+}

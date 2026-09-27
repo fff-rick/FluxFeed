@@ -1,0 +1,38 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "graphTooltip": 1,
+  "id": null,
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "description": "按缓存区域展示命中数占有效读取数的比例。",
+      "fieldConfig": {"defaults": {"color": {"mode": "thresholds"}, "min": 0, "max": 1, "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "yellow", "value": 0.8}, {"color": "green", "value": 0.95}]}, "unit": "percentunit"}, "overrides": []},
+      "gridPos": {"h": 9, "w": 24, "x": 0, "y": 0},
+      "id": 1,
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "single", "sort": "none"}},
+      "targets": [{"expr": "sum(rate(gcfeed_feed_cache_requests_total{result=\"hit\"}[5m])) by (area) / clamp_min(sum(rate(gcfeed_feed_cache_requests_total{result=~\"hit|miss\"}[5m])) by (area), 0.001)", "legendFormat": "{{area}}", "refId": "A"}],
+      "title": "Feed 缓存命中率",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "Prometheus"},
+      "description": "按缓存区域和结果展示写入吞吐。",
+      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "min": 0, "unit": "ops"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 9},
+      "id": 2,
+      "options": {"legend": {"displayMode": "table", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "multi", "sort": "desc"}},
+      "targets": [{"expr": "sum(rate(gcfeed_feed_cache_writes_total[5m])) by (area, result)", "legendFormat": "{{area}} / {{result}}", "refId": "A"}],
+      "title": "Feed 缓存写入速率",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 40,
+  "tags": ["fluxfeed", "缓存"],
+  "time": {"from": "now-30m", "to": "now"},
+  "timezone": "browser",
+  "title": "03 Feed 缓存",
+  "uid": "fluxfeed-cache",
+  "version": 1
+}
