@@ -371,6 +371,8 @@ Token，不把 Token 写进脚本、报告或 Git。
 - `http_reqs`、`http_req_failed`、`http_req_duration` 的 P50/P95/P99。
 - 每个 endpoint/scene 的请求数、失败率和延迟。
 - 自定义 `business_success_rate`。
+- 推荐场景的 `recommendation_degradation` 必须为 0；该 Counter 汇总测试期间新增的
+  `fallback`、`circuit_open`、`bulkhead_full` 和 `partial_recall`。
 - 预期 429 的独立计数 `rate_limited`。
 - `dropped_iterations` 和实际迭代速率。
 
@@ -613,7 +615,11 @@ PROFILE=soak k6 run scripts/performance-load.js
 PROFILE=governance k6 run scripts/performance-load.js
 ```
 
-可通过 `BASE_URL`、`LIMIT`、`RUN_ID`、`DURATION`、`RPS`、`STAGE_DURATION`、
+推荐场景会在 setup/teardown 通过 Prometheus 记录治理 Counter，并等待一个 15 秒采集周期
+后计算增量；任一推荐降级事件都会使 k6 阈值失败。Prometheus 非默认地址时设置
+`PROMETHEUS_URL`。
+
+可通过 `BASE_URL`、`PROMETHEUS_URL`、`LIMIT`、`RUN_ID`、`DURATION`、`RPS`、`STAGE_DURATION`、
 `PRE_ALLOCATED_VUS` 和 `MAX_VUS` 覆盖默认值。Publish 的 `MEDIA_URL` 和 `COVER_URL`
 默认引用本地测试路径，也可通过同名环境变量替换。
 
