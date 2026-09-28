@@ -3,7 +3,11 @@ package infraconfig
 import "testing"
 
 func TestKafkaConfigLoadsFromApplicationConfigs(t *testing.T) {
-	for _, path := range []string{"../../../configs/config.yaml", "../../../configs/config.docker.yaml"} {
+	for _, path := range []string{
+		"../../../configs/config.yaml",
+		"../../../configs/config.docker.yaml",
+		"../../../configs/config.performance.yaml",
+	} {
 		cfg, err := LoadConfig(path)
 		if err != nil {
 			t.Fatalf("LoadConfig(%s): %v", path, err)

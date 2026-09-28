@@ -10,6 +10,7 @@ import (
 func TestMonitoringYAMLIsValid(t *testing.T) {
 	paths := []string{
 		"../../../../docker-compose.yml",
+		"../../../../docker-compose.performance.yml",
 		"../../../../monitoring/tempo.yml",
 		"../../../../monitoring/grafana/provisioning/datasources/prometheus.yml",
 	}
