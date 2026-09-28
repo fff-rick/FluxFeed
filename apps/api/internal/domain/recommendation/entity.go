@@ -10,6 +10,7 @@ const MaxLimit = 100
 const MaxSceneLength = 32
 const MaxRequestIDLength = 64
 const RecentExposureWindow = 7 * 24 * time.Hour
+const NegativeFeedbackWindow = 30 * 24 * time.Hour
 
 const ExposureDecisionReasonFresh = "fresh"
 const ExposureDecisionReasonRecentlyExposed = "recently_exposed"

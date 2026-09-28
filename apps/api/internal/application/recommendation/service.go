@@ -18,7 +18,7 @@ import (
 
 const defaultLimit = 10
 const recallPerSource = 100
-const interestRecallPoolSize = 500
+const candidateOverfetchFactor = 2
 const preRankLimit = 200
 const defaultRankLimit = 50
 
@@ -171,17 +171,8 @@ func (s *Service) recallCandidates(ctx context.Context, userID int64) ([]*domain
 		index, source := index, source
 		group.Go(func() error {
 			startedAt := time.Now()
-			limit := recallPerSource
-			if source == domainrecommendation.RecallSourceInterest || source == domainrecommendation.RecallSourceSimilar {
-				limit = interestRecallPoolSize
-			}
+			limit := recallPerSource * candidateOverfetchFactor
 			candidates, err := s.repo.ListCandidatesBySource(groupCtx, userID, source, limit)
-			if err == nil && source == domainrecommendation.RecallSourceInterest {
-				candidates, err = s.personalizeInterestRecall(groupCtx, userID, candidates)
-			}
-			if err == nil && source == domainrecommendation.RecallSourceSimilar {
-				candidates, err = s.personalizeSimilarRecall(groupCtx, userID, candidates)
-			}
 			results[index] = recallResult{candidates: candidates, err: err}
 			inframetrics.ObserveRecommendationRecall(source, len(candidates), time.Since(startedAt), err)
 			return nil
@@ -209,10 +200,97 @@ func (s *Service) recallCandidates(ctx context.Context, userID int64) ([]*domain
 	if successes == 0 {
 		return nil, firstErr
 	}
+	if err := s.filterRecallPools(ctx, userID, pools); err != nil {
+		return nil, err
+	}
+	for index, source := range sources {
+		if results[index].err != nil {
+			continue
+		}
+		var err error
+		switch source {
+		case domainrecommendation.RecallSourceInterest:
+			pools[index], err = s.personalizeInterestRecall(ctx, userID, pools[index])
+		case domainrecommendation.RecallSourceSimilar:
+			pools[index], err = s.personalizeSimilarRecall(ctx, userID, pools[index])
+		default:
+			pools[index] = pools[index][:min(len(pools[index]), recallPerSource)]
+		}
+		if err != nil {
+			pools[index] = nil
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
 	if firstErr != nil {
 		inframetrics.ObserveGovernance("recommendation", "partial_recall")
 	}
 	return mergeRecallPools(pools), nil
+}
+
+func (s *Service) filterRecallPools(ctx context.Context, userID int64, pools [][]*domainrecommendation.Candidate) error {
+	videoIDs := make([]int64, 0)
+	authorIDs := make([]int64, 0)
+	seenVideos := map[int64]struct{}{}
+	seenAuthors := map[int64]struct{}{}
+	for _, pool := range pools {
+		for _, candidate := range pool {
+			if candidate == nil {
+				continue
+			}
+			if _, exists := seenVideos[candidate.VideoID]; !exists {
+				seenVideos[candidate.VideoID] = struct{}{}
+				videoIDs = append(videoIDs, candidate.VideoID)
+			}
+			if _, exists := seenAuthors[candidate.AuthorID]; !exists {
+				seenAuthors[candidate.AuthorID] = struct{}{}
+				authorIDs = append(authorIDs, candidate.AuthorID)
+			}
+		}
+	}
+	if len(videoIDs) == 0 {
+		return nil
+	}
+	exposures, err := s.repo.ListRecentExposures(ctx, userID, videoIDs, s.now().Add(-domainrecommendation.RecentExposureWindow))
+	if err != nil {
+		return err
+	}
+	exclusions, err := s.repo.ListNegativeCandidateExclusions(ctx, userID, videoIDs, authorIDs, s.now().Add(-domainrecommendation.NegativeFeedbackWindow))
+	if err != nil {
+		return err
+	}
+	excludedVideos := make(map[int64]struct{}, len(exposures)+len(exclusions.VideoIDs))
+	for _, exposure := range exposures {
+		if exposure != nil {
+			excludedVideos[exposure.VideoID] = struct{}{}
+		}
+	}
+	for _, videoID := range exclusions.VideoIDs {
+		excludedVideos[videoID] = struct{}{}
+	}
+	excludedAuthors := make(map[int64]struct{}, len(exclusions.AuthorIDs))
+	for _, authorID := range exclusions.AuthorIDs {
+		excludedAuthors[authorID] = struct{}{}
+	}
+	for index, pool := range pools {
+		filtered := pool[:0]
+		for _, candidate := range pool {
+			if candidate == nil {
+				continue
+			}
+			if _, excluded := excludedVideos[candidate.VideoID]; excluded {
+				continue
+			}
+			if _, excluded := excludedAuthors[candidate.AuthorID]; excluded {
+				continue
+			}
+			filtered = append(filtered, candidate)
+		}
+		pools[index] = filtered
+	}
+	// ponytail: 2x 有界超取先避免逐路游标补拉；仅在真实流量出现候选不足时再增加补拉协议。
+	return nil
 }
 
 func (s *Service) personalizeInterestRecall(ctx context.Context, userID int64, candidates []*domainrecommendation.Candidate) ([]*domainrecommendation.Candidate, error) {

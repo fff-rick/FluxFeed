@@ -34,6 +34,8 @@ services:
       - ./monitoring/tempo.yml:/etc/tempo.yml:ro
       - performance_tempo_data:/var/tempo
   api:
+    ports: !override
+      - "${PERFORMANCE_API_PORT:-8080}:8080"
     depends_on:
       kafka-init:
         condition: service_completed_successfully

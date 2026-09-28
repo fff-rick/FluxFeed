@@ -13,13 +13,30 @@ type degradedRecommendationRepo struct {
 	vectorErr       error
 	candidates      map[string][]*domainrecommendation.Candidate
 	candidateErrors map[string]error
+	exposures       []*domainrecommendation.Exposure
+	exclusions      *domainrecommendation.CandidateExclusions
+	limits          chan int
+	exposureCalls   *int
+	exclusionCalls  *int
 }
 
-func (r degradedRecommendationRepo) ListCandidatesBySource(_ context.Context, _ int64, source string, _ int) ([]*domainrecommendation.Candidate, error) {
+func (r degradedRecommendationRepo) ListCandidatesBySource(_ context.Context, _ int64, source string, limit int) ([]*domainrecommendation.Candidate, error) {
+	if r.limits != nil {
+		r.limits <- limit
+	}
 	return r.candidates[source], r.candidateErrors[source]
 }
 func (r degradedRecommendationRepo) ListRecentPositiveVideoIDs(context.Context, int64, int) ([]int64, error) {
 	return nil, nil
+}
+func (r degradedRecommendationRepo) ListNegativeCandidateExclusions(context.Context, int64, []int64, []int64, time.Time) (*domainrecommendation.CandidateExclusions, error) {
+	if r.exclusionCalls != nil {
+		*r.exclusionCalls++
+	}
+	if r.exclusions != nil {
+		return r.exclusions, nil
+	}
+	return &domainrecommendation.CandidateExclusions{}, nil
 }
 func (r degradedRecommendationRepo) LoadUserInterestVector(context.Context, int64) ([]float64, bool, error) {
 	return nil, false, r.profileErr
@@ -28,7 +45,10 @@ func (r degradedRecommendationRepo) LoadVideoVectors(context.Context, []int64) (
 	return nil, r.vectorErr
 }
 func (r degradedRecommendationRepo) ListRecentExposures(context.Context, int64, []int64, time.Time) ([]*domainrecommendation.Exposure, error) {
-	return nil, nil
+	if r.exposureCalls != nil {
+		*r.exposureCalls++
+	}
+	return r.exposures, nil
 }
 func (r degradedRecommendationRepo) SaveExposures(context.Context, []*domainrecommendation.ExposureWrite) ([]*domainrecommendation.Exposure, error) {
 	return nil, nil
@@ -108,5 +128,42 @@ func TestRecallCandidatesKeepsHealthySources(t *testing.T) {
 	got, err := New(repo).recallCandidates(context.Background(), 42)
 	if err != nil || len(got) != 1 || got[0].VideoID != 1 {
 		t.Fatalf("healthy recall source was discarded: %+v, err=%v", got, err)
+	}
+}
+
+func TestRecallCandidatesFiltersExposureNegativeVideoAndHiddenAuthor(t *testing.T) {
+	now := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
+	limits := make(chan int, 6)
+	exposureCalls, exclusionCalls := 0, 0
+	repo := degradedRecommendationRepo{
+		candidates: map[string][]*domainrecommendation.Candidate{
+			domainrecommendation.RecallSourceHot: {
+				domainrecommendation.RestoreCandidate(1, 10, 0, 0, 40, 0, domainrecommendation.RecallSourceHot, now),
+				domainrecommendation.RestoreCandidate(2, 20, 0, 0, 30, 0, domainrecommendation.RecallSourceHot, now),
+				domainrecommendation.RestoreCandidate(3, 30, 0, 0, 20, 0, domainrecommendation.RecallSourceHot, now),
+				domainrecommendation.RestoreCandidate(4, 40, 0, 0, 10, 0, domainrecommendation.RecallSourceHot, now),
+			},
+		},
+		exposures: []*domainrecommendation.Exposure{
+			domainrecommendation.RestoreExposure(1, 42, 1, now, now, 1, "recommend"),
+		},
+		exclusions:     &domainrecommendation.CandidateExclusions{VideoIDs: []int64{2}, AuthorIDs: []int64{30}},
+		limits:         limits,
+		exposureCalls:  &exposureCalls,
+		exclusionCalls: &exclusionCalls,
+	}
+
+	got, err := New(repo, WithNow(func() time.Time { return now })).recallCandidates(context.Background(), 42)
+	if err != nil || len(got) != 1 || got[0].VideoID != 4 {
+		t.Fatalf("unexpected filtered recall candidates: %+v, err=%v", got, err)
+	}
+	if exposureCalls != 1 || exclusionCalls != 1 {
+		t.Fatalf("expected one batch filter query each, exposures=%d exclusions=%d", exposureCalls, exclusionCalls)
+	}
+	close(limits)
+	for limit := range limits {
+		if limit != recallPerSource*candidateOverfetchFactor {
+			t.Fatalf("unexpected bounded candidate limit: %d", limit)
+		}
 	}
 }

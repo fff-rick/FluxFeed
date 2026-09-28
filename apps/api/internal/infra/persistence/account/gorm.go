@@ -61,11 +61,7 @@ func (r *Repository) FindByAccount(ctx context.Context, account string) (*domain
 	var user userWithStatModel
 	err := r.db.WithContext(ctx).
 		Table("account AS a").
-		Select(userWithStatSelect()).
-		Joins("LEFT JOIN user_relation_stat AS rs ON rs.user_id = a.id").
-		Joins("LEFT JOIN (SELECT user_id, COUNT(*) AS following_count FROM user_follow WHERE status = 1 GROUP BY user_id) AS active_following ON active_following.user_id = a.id").
-		Joins("LEFT JOIN (SELECT target_user_id, COUNT(*) AS follower_count FROM user_follow WHERE status = 1 GROUP BY target_user_id) AS active_followers ON active_followers.target_user_id = a.id").
-		Joins("LEFT JOIN (SELECT author_id, COUNT(*) AS work_count FROM video WHERE status = 2 GROUP BY author_id) AS published_works ON published_works.author_id = a.id").
+		Select(accountCredentialSelect()).
 		Where("a.account = ?", account).
 		Take(&user).
 		Error
@@ -85,10 +81,6 @@ func (r *Repository) FindByID(ctx context.Context, id int64) (*domainaccount.Use
 	err := r.db.WithContext(ctx).
 		Table("account AS a").
 		Select(userWithStatSelect()).
-		Joins("LEFT JOIN user_relation_stat AS rs ON rs.user_id = a.id").
-		Joins("LEFT JOIN (SELECT user_id, COUNT(*) AS following_count FROM user_follow WHERE status = 1 GROUP BY user_id) AS active_following ON active_following.user_id = a.id").
-		Joins("LEFT JOIN (SELECT target_user_id, COUNT(*) AS follower_count FROM user_follow WHERE status = 1 GROUP BY target_user_id) AS active_followers ON active_followers.target_user_id = a.id").
-		Joins("LEFT JOIN (SELECT author_id, COUNT(*) AS work_count FROM video WHERE status = 2 GROUP BY author_id) AS published_works ON published_works.author_id = a.id").
 		Where("a.id = ?", id).
 		Take(&user).
 		Error
@@ -139,7 +131,11 @@ func restoreUser(user userWithStatModel) *domainaccount.User {
 }
 
 func userWithStatSelect() string {
-	return "a.id, a.account, a.password, a.nickname, a.avatar_url, a.bio, a.status, a.role, COALESCE(active_following.following_count, rs.following_count, 0) AS following_count, COALESCE(active_followers.follower_count, rs.follower_count, 0) AS follower_count, COALESCE(published_works.work_count, 0) AS work_count"
+	return "a.id, a.account, a.password, a.nickname, a.avatar_url, a.bio, a.status, a.role, (SELECT COUNT(*) FROM user_follow AS active_following WHERE active_following.user_id = a.id AND active_following.status = 1) AS following_count, (SELECT COUNT(*) FROM user_follow AS active_follower WHERE active_follower.target_user_id = a.id AND active_follower.status = 1) AS follower_count, (SELECT COUNT(*) FROM video AS published_work WHERE published_work.author_id = a.id AND published_work.status = 2) AS work_count"
+}
+
+func accountCredentialSelect() string {
+	return "a.id, a.account, a.password, a.nickname, a.avatar_url, a.bio, a.status, a.role, 0 AS following_count, 0 AS follower_count, 0 AS work_count"
 }
 
 // isDuplicateKeyError 兼容 GORM 标准错误和 MySQL 1062 唯一键冲突。

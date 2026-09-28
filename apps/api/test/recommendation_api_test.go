@@ -109,9 +109,6 @@ func (r *memoryRecommendationRepo) ListCandidatesBySource(ctx context.Context, u
 		if item == nil {
 			continue
 		}
-		if r.exposures[recommendationExposureKey(userID, item.VideoID)] != nil {
-			continue
-		}
 		value := *item
 		value.Reason = source
 		items = append(items, &value)
@@ -129,6 +126,10 @@ func (r *memoryRecommendationRepo) ListCandidatesBySource(ctx context.Context, u
 		items = items[:limit]
 	}
 	return items, nil
+}
+
+func (r *memoryRecommendationRepo) ListNegativeCandidateExclusions(context.Context, int64, []int64, []int64, time.Time) (*domainrecommendation.CandidateExclusions, error) {
+	return &domainrecommendation.CandidateExclusions{}, nil
 }
 
 func (r *memoryRecommendationRepo) ListRecentPositiveVideoIDs(context.Context, int64, int) ([]int64, error) {
