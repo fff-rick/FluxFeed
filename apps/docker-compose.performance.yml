@@ -1,0 +1,69 @@
+services:
+  mysql:
+    ports: !reset []
+    volumes:
+      - performance_mysql_data:/var/lib/mysql
+  redis:
+    ports: !reset []
+    volumes:
+      - performance_redis_data:/data
+  rabbitmq:
+    volumes:
+      - performance_rabbitmq_data:/var/lib/rabbitmq
+  kafka:
+    volumes:
+      - performance_kafka_data:/var/lib/kafka/data
+  kafka-init:
+    image: apache/kafka:4.3.1
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        for topic in fluxfeed.video fluxfeed.interaction fluxfeed.exposure fluxfeed.relation; do
+          /opt/kafka/bin/kafka-topics.sh \
+            --bootstrap-server kafka:19092 \
+            --create --if-not-exists \
+            --topic "$$topic" \
+            --partitions 3 \
+            --replication-factor 1
+        done
+  tempo:
+    volumes:
+      - ./monitoring/tempo.yml:/etc/tempo.yml:ro
+      - performance_tempo_data:/var/tempo
+  api:
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./api/configs/config.performance.yaml:/app/configs/config.yaml:ro
+      - performance_api_uploads:/app/uploads
+  worker:
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./api/configs/config.performance.yaml:/app/configs/config.yaml:ro
+  prometheus:
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - performance_prometheus_data:/prometheus
+  grafana:
+    ports: !override
+      - "13000:3000"
+    volumes:
+      - performance_grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+
+volumes:
+  performance_mysql_data:
+  performance_redis_data:
+  performance_rabbitmq_data:
+  performance_kafka_data:
+  performance_api_uploads:
+  performance_prometheus_data:
+  performance_grafana_data:
+  performance_tempo_data:

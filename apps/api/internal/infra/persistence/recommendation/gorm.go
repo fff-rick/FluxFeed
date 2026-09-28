@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"gorm.io/gorm"
@@ -18,13 +19,6 @@ import (
 )
 
 const hotScoreExpression = "COALESCE(vs.like_count, 0) * 3 + COALESCE(vs.comment_count, 0) * 5 + COALESCE(vs.favorite_count, 0) * 4"
-const feedbackFilter = `NOT EXISTS (
-	SELECT 1 FROM video_view_events AS negative
-	JOIN video AS negative_video ON negative_video.id = negative.video_id
-	WHERE negative.user_id = ? AND negative.created_at >= ?
-	  AND ((negative.video_id = v.id AND negative.event_type IN ?)
-	    OR (negative.event_type = ? AND negative_video.author_id = v.author_id))
-)`
 const positiveEventWindow = 30 * 24 * time.Hour
 const negativeFeedbackWindow = 30 * 24 * time.Hour
 const profileSignalLimit = 200
@@ -49,6 +43,32 @@ func New(db *gorm.DB) *Repository {
 	return &Repository{db: db}
 }
 
+func feedbackFilter(videoIDColumn string, authorIDColumn string) string {
+	return fmt.Sprintf(`NOT EXISTS (
+		SELECT 1 FROM video_view_events AS negative_video_event
+		WHERE negative_video_event.user_id = ?
+		  AND negative_video_event.video_id = %s
+		  AND negative_video_event.created_at >= ?
+		  AND negative_video_event.event_type IN ?
+	)
+	AND %s NOT IN (
+		SELECT hidden_video.author_id
+		FROM video_view_events AS hidden_event
+		JOIN video AS hidden_video ON hidden_video.id = hidden_event.video_id
+		WHERE hidden_event.user_id = ?
+		  AND hidden_event.created_at >= ?
+		  AND hidden_event.event_type = ?
+	)`, videoIDColumn, authorIDColumn)
+}
+
+func applyFeedbackFilter(query *gorm.DB, userID int64, videoIDColumn string, authorIDColumn string) *gorm.DB {
+	cutoff := time.Now().Add(-negativeFeedbackWindow)
+	return query.Where(feedbackFilter(videoIDColumn, authorIDColumn),
+		userID, cutoff, videoNegativeEventTypes(),
+		userID, cutoff, domainexposure.EventTypeHideAuthor,
+	)
+}
+
 func (r *Repository) ListCandidatesBySource(ctx context.Context, userID int64, source string, limit int) ([]*domainrecommendation.Candidate, error) {
 	if limit <= 0 {
 		return []*domainrecommendation.Candidate{}, nil
@@ -64,14 +84,8 @@ func (r *Repository) ListCandidatesBySource(ctx context.Context, userID int64, s
 			userID,
 			time.Now().Add(-domainrecommendation.RecentExposureWindow),
 		).
-		Where("v.status = ? AND v.published_at IS NOT NULL AND e.video_id IS NULL", domainvideo.StatusPublished).
-		Where(`NOT EXISTS (
-			SELECT 1 FROM video_view_events AS negative
-			JOIN video AS negative_video ON negative_video.id = negative.video_id
-			WHERE negative.user_id = ? AND negative.created_at >= ?
-			  AND ((negative.video_id = v.id AND negative.event_type IN ?)
-			    OR (negative.event_type = ? AND negative_video.author_id = v.author_id))
-		)`, userID, time.Now().Add(-negativeFeedbackWindow), videoNegativeEventTypes(), domainexposure.EventTypeHideAuthor)
+		Where("v.status = ? AND v.published_at IS NOT NULL AND e.video_id IS NULL", domainvideo.StatusPublished)
+	query = applyFeedbackFilter(query, userID, "v.id", "v.author_id")
 	switch source {
 	case domainrecommendation.RecallSourceHot:
 		query = query.Order("hot_score DESC").Order("v.published_at DESC")
@@ -132,17 +146,11 @@ func (r *Repository) ListRecentPositiveVideoIDs(ctx context.Context, userID int6
 		return []int64{}, nil
 	}
 	var rows []struct{ VideoID int64 }
-	err := r.db.WithContext(ctx).Table("video_view_events").Select("video_view_events.video_id").
+	query := r.db.WithContext(ctx).Table("video_view_events").Select("video_view_events.video_id").
 		Joins("JOIN video AS watched ON watched.id = video_view_events.video_id").
-		Where("video_view_events.user_id = ? AND video_view_events.created_at >= ? AND video_view_events.event_type IN ?", userID, time.Now().Add(-positiveEventWindow), positiveEventTypes()).
-		Where(`NOT EXISTS (
-			SELECT 1 FROM video_view_events AS negative
-			JOIN video AS negative_video ON negative_video.id = negative.video_id
-			WHERE negative.user_id = video_view_events.user_id AND negative.created_at >= ?
-			  AND ((negative.video_id = video_view_events.video_id AND negative.event_type IN ?)
-			    OR (negative.event_type = ? AND negative_video.author_id = watched.author_id))
-		)`, time.Now().Add(-negativeFeedbackWindow), videoNegativeEventTypes(), domainexposure.EventTypeHideAuthor).
-		Group("video_view_events.video_id").Order("MAX(video_view_events.created_at) DESC").Limit(limit).Scan(&rows).Error
+		Where("video_view_events.user_id = ? AND video_view_events.created_at >= ? AND video_view_events.event_type IN ?", userID, time.Now().Add(-positiveEventWindow), positiveEventTypes())
+	query = applyFeedbackFilter(query, userID, "video_view_events.video_id", "watched.author_id")
+	err := query.Group("video_view_events.video_id").Order("MAX(video_view_events.created_at) DESC").Limit(limit).Scan(&rows).Error
 	videoIDs := make([]int64, 0, len(rows))
 	for _, row := range rows {
 		videoIDs = append(videoIDs, row.VideoID)
@@ -162,25 +170,29 @@ func (r *Repository) LoadUserInterestVector(ctx context.Context, userID int64) (
 	if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, false, err
 	}
-	return r.calculateUserInterestVector(ctx, userID)
+	vector, ok, err := r.calculateUserInterestVector(ctx, userID)
+	if err != nil {
+		return nil, false, err
+	}
+	if err := r.saveUserInterestVector(ctx, userID, vector); err != nil {
+		return nil, false, err
+	}
+	return vector, ok, nil
 }
 
 // RefreshUserInterestVector 从权威行为数据重算用户向量，重复消费同一事件结果不变。
 func (r *Repository) RefreshUserInterestVector(ctx context.Context, userID int64) error {
-	vector, ok, err := r.calculateUserInterestVector(ctx, userID)
+	vector, _, err := r.calculateUserInterestVector(ctx, userID)
 	if err != nil {
 		return err
 	}
-	if !ok {
-		return InvalidateUserInterest(r.db.WithContext(ctx), userID)
-	}
-	content, err := json.Marshal(vector)
+	return r.saveUserInterestVector(ctx, userID, vector)
+}
+
+func (r *Repository) saveUserInterestVector(ctx context.Context, userID int64, vector []float64) error {
+	model, err := newUserInterestModel(userID, vector)
 	if err != nil {
 		return err
-	}
-	model := UserInterestModel{
-		UserID: userID, Model: domainembedding.HashNgramModel,
-		Dimension: len(vector), EmbeddingJSON: string(content),
 	}
 	return r.db.WithContext(ctx).Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "user_id"}, {Name: "model"}},
@@ -188,24 +200,30 @@ func (r *Repository) RefreshUserInterestVector(ctx context.Context, userID int64
 	}).Create(&model).Error
 }
 
+func newUserInterestModel(userID int64, vector []float64) (UserInterestModel, error) {
+	if vector == nil {
+		vector = []float64{}
+	}
+	content, err := json.Marshal(vector)
+	if err != nil {
+		return UserInterestModel{}, err
+	}
+	return UserInterestModel{
+		UserID: userID, Model: domainembedding.HashNgramModel,
+		Dimension: len(vector), EmbeddingJSON: string(content),
+	}, nil
+}
+
 func (r *Repository) calculateUserInterestVector(ctx context.Context, userID int64) ([]float64, bool, error) {
 	accumulator := &vectorAccumulator{}
-	rows, err := r.db.WithContext(ctx).
+	query := r.db.WithContext(ctx).
 		Table("video_view_events AS ev").
 		Select("ve.embedding_json, ev.event_type, ev.watch_ms, ev.completed").
 		Joins("JOIN video_embedding AS ve ON ve.video_id = ev.video_id AND ve.model = ?", domainembedding.HashNgramModel).
 		Joins("JOIN video AS watched ON watched.id = ev.video_id").
-		Where("ev.user_id = ? AND ev.created_at >= ? AND ev.event_type IN ?", userID, time.Now().Add(-positiveEventWindow), positiveEventTypes()).
-		Where(`NOT EXISTS (
-			SELECT 1 FROM video_view_events AS negative
-			JOIN video AS negative_video ON negative_video.id = negative.video_id
-			WHERE negative.user_id = ev.user_id AND negative.created_at >= ?
-			  AND ((negative.video_id = ev.video_id AND negative.event_type IN ?)
-			    OR (negative.event_type = ? AND negative_video.author_id = watched.author_id))
-		)`, time.Now().Add(-negativeFeedbackWindow), videoNegativeEventTypes(), domainexposure.EventTypeHideAuthor).
-		Order("ev.created_at DESC").
-		Limit(profileSignalLimit).
-		Rows()
+		Where("ev.user_id = ? AND ev.created_at >= ? AND ev.event_type IN ?", userID, time.Now().Add(-positiveEventWindow), positiveEventTypes())
+	query = applyFeedbackFilter(query, userID, "ev.video_id", "watched.author_id")
+	rows, err := query.Order("ev.created_at DESC").Limit(profileSignalLimit).Rows()
 	if err != nil {
 		return nil, false, err
 	}
@@ -225,13 +243,13 @@ func (r *Repository) calculateUserInterestVector(ctx context.Context, userID int
 	}
 	rows.Close()
 
-	actionRows, err := r.db.WithContext(ctx).Table("interaction_action AS ia").
+	actionQuery := r.db.WithContext(ctx).Table("interaction_action AS ia").
 		Select("ve.embedding_json, ia.action_type").
 		Joins("JOIN video AS v ON v.id = ia.video_id").
 		Joins("JOIN video_embedding AS ve ON ve.video_id = ia.video_id AND ve.model = ?", domainembedding.HashNgramModel).
-		Where("ia.user_id = ? AND ia.status = ? AND ia.updated_at >= ?", userID, domaininteraction.ActionStatusActive, time.Now().Add(-positiveEventWindow)).
-		Where(feedbackFilter, userID, time.Now().Add(-negativeFeedbackWindow), videoNegativeEventTypes(), domainexposure.EventTypeHideAuthor).
-		Order("ia.updated_at DESC").Limit(profileSignalLimit).Rows()
+		Where("ia.user_id = ? AND ia.status = ? AND ia.updated_at >= ?", userID, domaininteraction.ActionStatusActive, time.Now().Add(-positiveEventWindow))
+	actionQuery = applyFeedbackFilter(actionQuery, userID, "v.id", "v.author_id")
+	actionRows, err := actionQuery.Order("ia.updated_at DESC").Limit(profileSignalLimit).Rows()
 	if err != nil {
 		return nil, false, err
 	}
@@ -253,13 +271,13 @@ func (r *Repository) calculateUserInterestVector(ctx context.Context, userID int
 	}
 	actionRows.Close()
 
-	commentRows, err := r.db.WithContext(ctx).Table("interaction_comment AS c").
+	commentQuery := r.db.WithContext(ctx).Table("interaction_comment AS c").
 		Select("ve.embedding_json").
 		Joins("JOIN video AS v ON v.id = c.video_id").
 		Joins("JOIN video_embedding AS ve ON ve.video_id = c.video_id AND ve.model = ?", domainembedding.HashNgramModel).
-		Where("c.user_id = ? AND c.status = ? AND c.created_at >= ?", userID, domaininteraction.CommentStatusNormal, time.Now().Add(-positiveEventWindow)).
-		Where(feedbackFilter, userID, time.Now().Add(-negativeFeedbackWindow), videoNegativeEventTypes(), domainexposure.EventTypeHideAuthor).
-		Order("c.created_at DESC").Limit(profileSignalLimit).Rows()
+		Where("c.user_id = ? AND c.status = ? AND c.created_at >= ?", userID, domaininteraction.CommentStatusNormal, time.Now().Add(-positiveEventWindow))
+	commentQuery = applyFeedbackFilter(commentQuery, userID, "v.id", "v.author_id")
+	commentRows, err := commentQuery.Order("c.created_at DESC").Limit(profileSignalLimit).Rows()
 	if err != nil {
 		return nil, false, err
 	}
@@ -277,13 +295,13 @@ func (r *Repository) calculateUserInterestVector(ctx context.Context, userID int
 	}
 	commentRows.Close()
 
-	followRows, err := r.db.WithContext(ctx).Table("user_follow AS f").
+	followQuery := r.db.WithContext(ctx).Table("user_follow AS f").
 		Select("ve.embedding_json").
 		Joins("JOIN video AS v ON v.author_id = f.target_user_id AND v.status = ? AND v.published_at >= ?", domainvideo.StatusPublished, time.Now().Add(-positiveEventWindow)).
 		Joins("JOIN video_embedding AS ve ON ve.video_id = v.id AND ve.model = ?", domainembedding.HashNgramModel).
-		Where("f.user_id = ? AND f.status = ?", userID, domainrelation.FollowStatusActive).
-		Where(feedbackFilter, userID, time.Now().Add(-negativeFeedbackWindow), videoNegativeEventTypes(), domainexposure.EventTypeHideAuthor).
-		Order("v.published_at DESC").Limit(20).Rows()
+		Where("f.user_id = ? AND f.status = ?", userID, domainrelation.FollowStatusActive)
+	followQuery = applyFeedbackFilter(followQuery, userID, "v.id", "v.author_id")
+	followRows, err := followQuery.Order("v.published_at DESC").Limit(20).Rows()
 	if err != nil {
 		return nil, false, err
 	}
