@@ -3,6 +3,7 @@ import { check, sleep } from "k6";
 import { Counter, Rate, Trend } from "k6/metrics";
 
 const baseURL = (__ENV.BASE_URL || "http://127.0.0.1:8080").replace(/\/$/, "");
+const prometheusURL = (__ENV.PROMETHEUS_URL || "http://127.0.0.1:9090").replace(/\/$/, "");
 const profile = __ENV.PROFILE || "smoke";
 const limit = positiveNumber("LIMIT", 20);
 const runID = __ENV.RUN_ID || `${Date.now()}`;
@@ -13,6 +14,10 @@ const businessSuccess = new Rate("business_success_rate");
 const unexpectedFailure = new Rate("unexpected_failure_rate");
 const rateLimited = new Counter("rate_limited");
 const operationDuration = new Trend("operation_duration", true);
+const recommendationDegradation = new Counter("recommendation_degradation");
+
+const recommendationGovernanceDecisions = ["fallback", "circuit_open", "bulkhead_full", "partial_recall"];
+const recommendationProfiles = ["smoke", "baseline-recommend", "mixed", "capacity", "spike", "soak"];
 
 const accounts = parseAccounts();
 const profiles = {
@@ -67,8 +72,9 @@ export const options = {
 let cursors = {};
 
 export function setup() {
+  const governanceBaseline = monitorsRecommendation() ? recommendationGovernanceCounters() : {};
   const needsAuth = profile !== "baseline-timeline" && profile !== "baseline-hot" && profile !== "governance";
-  if (!needsAuth) return { users: [] };
+  if (!needsAuth) return { users: [], governanceBaseline };
   if (accounts.length === 0) {
     throw new Error("authenticated profile requires ACCOUNT/PASSWORD or ACCOUNTS_JSON");
   }
@@ -97,7 +103,26 @@ export function setup() {
     return { token, id: body.id, account: account.account };
   });
 
-  return { users };
+  return { users, governanceBaseline };
+}
+
+export function teardown(data) {
+  if (!monitorsRecommendation()) return;
+
+  // Prometheus currently scrapes every 15 seconds; wait for the final application counters.
+  sleep(16);
+  const current = recommendationGovernanceCounters();
+  for (const decision of recommendationGovernanceDecisions) {
+    const before = Number(data.governanceBaseline[decision] || 0);
+    const after = Number(current[decision] || 0);
+    if (after < before) {
+      throw new Error(`recommendation governance counter reset during test: ${decision} ${before} -> ${after}`);
+    }
+    const delta = after - before;
+    recommendationDegradation.add(delta, { decision });
+    check(delta, { [`recommendation ${decision} delta is 0`]: (value) => value === 0 });
+    console.log(`recommendation governance ${decision}: before=${before} after=${after} delta=${delta}`);
+  }
 }
 
 export function smoke(data) {
@@ -309,6 +334,32 @@ function safeJSON(response) {
   }
 }
 
+function monitorsRecommendation() {
+  return recommendationProfiles.includes(profile);
+}
+
+function recommendationGovernanceCounters() {
+  const selector = 'sum(gcfeed_governance_events_total{component="recommendation",decision=~"fallback|circuit_open|bulkhead_full|partial_recall"}) by (decision)';
+  const response = http.get(
+    `${prometheusURL}/api/v1/query?query=${encodeURIComponent(selector)}`,
+    { tags: { operation: "prometheus_governance" } },
+  );
+  const body = safeJSON(response);
+  if (response.status !== 200 || body.status !== "success" || !Array.isArray(body.data && body.data.result)) {
+    throw new Error(`failed to query recommendation governance counters: status=${response.status} body=${response.body}`);
+  }
+
+  const counters = Object.fromEntries(recommendationGovernanceDecisions.map((decision) => [decision, 0]));
+  for (const item of body.data.result) {
+    const decision = item.metric && item.metric.decision;
+    const value = Array.isArray(item.value) ? Number(item.value[1]) : NaN;
+    if (Object.prototype.hasOwnProperty.call(counters, decision) && Number.isFinite(value)) {
+      counters[decision] = value;
+    }
+  }
+  return counters;
+}
+
 function parseAccounts() {
   if (__ENV.ACCOUNTS_JSON) {
     const parsed = JSON.parse(__ENV.ACCOUNTS_JSON);
@@ -405,6 +456,9 @@ function thresholds(selectedProfile) {
   };
   if (selectedProfile === "governance") return result;
   result.http_req_failed = ["rate<0.01"];
+  if (recommendationProfiles.includes(selectedProfile)) {
+    result.recommendation_degradation = ["count==0"];
+  }
   result["operation_duration{operation:timeline}"] = ["p(95)<300", "p(99)<3000"];
   result["operation_duration{operation:hot}"] = ["p(95)<300", "p(99)<3000"];
   result["operation_duration{operation:recommend}"] = ["p(95)<500", "p(99)<3000"];
