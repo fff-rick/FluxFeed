@@ -153,10 +153,11 @@ Fanout。数据量是默认值，不是生产规模声明。
 
 ### 4.2 账号池与目标池
 
-- 建立 200 个独立压测账号，账号凭据保存于不提交 Git 的本地数据文件。
-- setup 阶段登录一次并构建 Token 池；VU 通过 `(__VU - 1) % 200` 选择身份。
-- Recommend、Exposure、Like、Follow、Publish 均使用登录态；Timeline、Hot 可匿名，
-  但综合流量中应携带身份，以覆盖 Viewer Action 和 Seen Filter。
+- 建立 200 个独立压测账号，拆分为互不重叠的只读池与写入池，凭据保存于不提交 Git 的
+  本地数据文件。
+- setup 阶段分别登录并构建 Token 池；VU 通过 `(__VU - 1) % pool_size` 选择身份。
+- Timeline、Hot、Recommend 使用只读池；Exposure、Like、Follow、Publish 使用写入池。
+  `mixed`、`capacity`、`spike`、`soak` 会拒绝账号重叠，避免写行为改变读基线画像。
 - 视频目标池排除已删除、未发布和作者自己的非法目标；关注目标池排除当前用户自身。
 - 写请求按 VU 与迭代号轮换目标，避免所有请求只竞争同一数据库行；缓存专项除外。
 
@@ -177,8 +178,9 @@ request_id:       perf-<run_id>-<scenario>-<vu>-<iter>
   `request_id` 只用于一次业务请求。
 - Publish、Like 和 Follow 的异步副作用必须在流量结束后继续观察 5 分钟。
 
-Baseline 与 Retest 必须从相同数据库快照开始。写场景结束后还原快照或为下一轮使用
-新的隔离数据分片，不能直接在被上一轮污染的数据上比较。
+Baseline 与 Retest 必须从相同 MySQL 快照开始。Redis 缓存包含 TTL，不复制 RDB；每次恢复
+后清空性能专用 Redis、重启 API 清除 L1，再执行同一预热步骤。写场景结束后还原快照或为
+下一轮使用新的隔离数据分片，不能直接在被上一轮污染的数据上比较。
 
 ### 4.4 数据就绪检查
 
@@ -186,7 +188,7 @@ Baseline 与 Retest 必须从相同数据库快照开始。写场景结束后还
 
 ```sql
 SELECT COUNT(*) FROM account;
-SELECT COUNT(*) FROM video WHERE status = 1;
+SELECT COUNT(*) FROM video WHERE status = 2;
 SELECT COUNT(*) FROM user_follow WHERE status = 1;
 SELECT COUNT(*) FROM interaction_action WHERE status = 1;
 SELECT COUNT(*) FROM video_view_events;
@@ -574,25 +576,77 @@ docker compose \
   up -d --build
 ```
 
+性能覆盖文件默认仍暴露 API `8080`。若该端口不可用，可统一指定备用端口：
+
+```bash
+export PERFORMANCE_API_PORT=18081
+export PERFORMANCE_BASE_URL=http://127.0.0.1:18081
+export BASE_URL=$PERFORMANCE_BASE_URL
+docker compose \
+  -f apps/docker-compose.yml \
+  -f apps/docker-compose.performance.yml \
+  up -d --build
+```
+
+`PERFORMANCE_API_PORT` 控制 Compose 端口映射，`PERFORMANCE_BASE_URL` 用于快照恢复后的
+健康检查，`BASE_URL` 用于 k6；三者必须指向同一个 API 实例。
+
+确认 Outbox 已排空后创建只读快照；创建期间脚本会短暂停止 API/Worker，且只允许操作挂载
+`performance_*` 数据卷的容器。快照文件保存在已被 Git 忽略的
+`build/performance/snapshots/`：
+
+```bash
+scripts/performance-snapshot.sh create small-diagnostic-v1
+scripts/performance-snapshot.sh verify small-diagnostic-v1
+
+# 每轮 Before/After 开始前执行；该操作会覆盖性能 MySQL 并清空性能 Redis。
+scripts/performance-snapshot.sh restore small-diagnostic-v1
+```
+
+P0 小数据回归完成后，可从 `small-diagnostic-v1` 生成固定的 `medium-v1`。脚本会先恢复小型
+快照，只允许操作性能专用数据卷；历史数据使用集合 SQL 写入，不制造百万条 Outbox/Kafka
+事件。密码只会写入 Git 忽略的本地账号池文件：
+
+```bash
+export PERFORMANCE_API_PORT=18081
+export PERFORMANCE_BASE_URL=http://127.0.0.1:18081
+export PERFORMANCE_PASSWORD='<local-random-password>'
+scripts/performance-seed-medium.sh
+```
+
+生成结果位于 `build/performance/medium-v1/`：
+
+- `read-accounts.json`：100 个只读账号；
+- `write-accounts.json`：100 个写入账号；
+- `video-ids.txt`、`target-user-ids.txt`：k6 目标池；
+- `smoke*.json`、`recommend*.json`：本机诊断结果，不提交 Git。
+
+同名 `medium-v1` 快照已存在时脚本会拒绝覆盖。需要重建时应先人工归档旧快照，不能让脚本
+静默删除已有基准。
+
 先用 k6 静态解析场景：
 
 ```bash
 k6 inspect \
   -e PROFILE=mixed \
-  -e ACCOUNT=perf001 \
-  -e PASSWORD='<local-password>' \
+  -e READ_ACCOUNTS_JSON='[{"account":"perf-reader-001","password":"<local-password>"}]' \
+  -e WRITE_ACCOUNTS_JSON='[{"account":"perf-writer-001","password":"<local-password>"}]' \
   -e VIDEO_IDS=1,2,3 \
   -e TARGET_USER_IDS=101,102,103 \
   scripts/performance-load.js
 ```
 
-单账号适合冒烟；正式测试通过 `ACCOUNTS_JSON` 传入账号池。凭据只保存在本机环境变量，
-不得写入仓库或报告：
+单账号适合冒烟；正式混合测试必须分别传入互不重叠的 `READ_ACCOUNTS_JSON` 和
+`WRITE_ACCOUNTS_JSON`。凭据只保存在本机环境变量，不得写入仓库或报告：
 
 ```bash
-export ACCOUNTS_JSON='[
-  {"account":"perf001","password":"<local-password>"},
-  {"account":"perf002","password":"<local-password>"}
+export READ_ACCOUNTS_JSON='[
+  {"account":"perf-reader-001","password":"<local-password>"},
+  {"account":"perf-reader-002","password":"<local-password>"}
+]'
+export WRITE_ACCOUNTS_JSON='[
+  {"account":"perf-writer-001","password":"<local-password>"},
+  {"account":"perf-writer-002","password":"<local-password>"}
 ]'
 export VIDEO_IDS='1,2,3'
 export TARGET_USER_IDS='101,102,103'
@@ -609,7 +663,8 @@ PROFILE=soak k6 run scripts/performance-load.js
 ```
 
 `write`、`mixed`、`capacity`、`spike`、`soak` 和完整 `smoke` 必须提供视频与关注目标池；
-缺少参数时 setup 会直接终止。默认治理配置下单独运行：
+其中四个混合场景还会强制校验读写账号不重叠。兼容变量 `ACCOUNTS_JSON` 仅用于冒烟或单一
+读/写场景，缺少参数时 setup 会直接终止。默认治理配置下单独运行：
 
 ```bash
 PROFILE=governance k6 run scripts/performance-load.js

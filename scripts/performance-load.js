@@ -18,8 +18,11 @@ const recommendationDegradation = new Counter("recommendation_degradation");
 
 const recommendationGovernanceDecisions = ["fallback", "circuit_open", "bulkhead_full", "partial_recall"];
 const recommendationProfiles = ["smoke", "baseline-recommend", "mixed", "capacity", "spike", "soak"];
+const mixedProfiles = ["mixed", "capacity", "spike", "soak"];
 
-const accounts = parseAccounts();
+const defaultAccounts = parseDefaultAccounts();
+const readAccounts = parseAccountPool("READ_ACCOUNTS_JSON", defaultAccounts);
+const writeAccounts = parseAccountPool("WRITE_ACCOUNTS_JSON", defaultAccounts);
 const profiles = {
   smoke: {
     scenarios: {
@@ -72,18 +75,34 @@ export const options = {
 let cursors = {};
 
 export function setup() {
-  const governanceBaseline = monitorsRecommendation() ? recommendationGovernanceCounters() : {};
   const needsAuth = profile !== "baseline-timeline" && profile !== "baseline-hot" && profile !== "governance";
-  if (!needsAuth) return { users: [], governanceBaseline };
-  if (accounts.length === 0) {
-    throw new Error("authenticated profile requires ACCOUNT/PASSWORD or ACCOUNTS_JSON");
+  if (!needsAuth) {
+    const governanceBaseline = monitorsRecommendation() ? recommendationGovernanceCounters() : {};
+    return { readUsers: [], writeUsers: [], governanceBaseline };
   }
+
+  const needsReadPool = profile !== "write";
+  const needsWritePool = profile === "smoke" || profile === "write" || mixedProfiles.includes(profile);
+  if (needsReadPool && readAccounts.length === 0) {
+    throw new Error(`${profile} requires READ_ACCOUNTS_JSON or ACCOUNT/PASSWORD`);
+  }
+  if (needsWritePool && writeAccounts.length === 0) {
+    throw new Error(`${profile} requires WRITE_ACCOUNTS_JSON or ACCOUNT/PASSWORD`);
+  }
+  if (mixedProfiles.includes(profile)) assertDisjointPools(readAccounts, writeAccounts);
   if (["smoke", "write", "mixed", "capacity", "spike", "soak"].includes(profile)) {
     if (videoIDs.length === 0) throw new Error(`${profile} requires VIDEO_IDS`);
     if (targetUserIDs.length === 0) throw new Error(`${profile} requires TARGET_USER_IDS`);
   }
 
-  const users = accounts.map((account) => {
+  const governanceBaseline = monitorsRecommendation() ? recommendationGovernanceCounters() : {};
+  const readUsers = needsReadPool ? loginAccounts(readAccounts) : [];
+  const writeUsers = needsWritePool ? loginAccounts(writeAccounts) : [];
+  return { readUsers, writeUsers, governanceBaseline };
+}
+
+function loginAccounts(accounts) {
+  return accounts.map((account) => {
     const login = http.post(
       `${baseURL}/api/sessions`,
       JSON.stringify({ account: account.account, password: account.password }),
@@ -102,8 +121,6 @@ export function setup() {
     }
     return { token, id: body.id, account: account.account };
   });
-
-  return { users, governanceBaseline };
 }
 
 export function teardown(data) {
@@ -126,9 +143,8 @@ export function teardown(data) {
 }
 
 export function smoke(data) {
-  const user = userFor(data);
-  timeline(user);
-  hot(user);
+  timeline(data);
+  hot(data);
   recommend(data);
   if (videoIDs.length > 0) {
     exposure(data);
@@ -140,15 +156,15 @@ export function smoke(data) {
 }
 
 export function timeline(data) {
-  feedGET("timeline", userFor(data));
+  feedGET("timeline", userFor(data, "readUsers"));
 }
 
 export function hot(data) {
-  feedGET("hot", userFor(data));
+  feedGET("hot", userFor(data, "readUsers"));
 }
 
 export function recommend(data) {
-  const user = requireUser(data, "recommend");
+  const user = requireUser(data, "recommend", "readUsers");
   const cursor = nextCursor("recommend");
   const response = http.post(
     `${baseURL}/api/feed-queries`,
@@ -165,7 +181,7 @@ export function recommend(data) {
 }
 
 export function exposure(data) {
-  const user = requireUser(data, "exposure");
+  const user = requireUser(data, "exposure", "writeUsers");
   const videoID = requireTarget(videoIDs, "VIDEO_IDS");
   const response = http.post(
     `${baseURL}/api/video-view-events`,
@@ -183,7 +199,7 @@ export function exposure(data) {
 }
 
 export function like(data) {
-  const user = requireUser(data, "like");
+  const user = requireUser(data, "like", "writeUsers");
   const videoID = requireTarget(videoIDs, "VIDEO_IDS");
   const response = http.put(
     `${baseURL}/api/videos/${videoID}/like`,
@@ -194,7 +210,7 @@ export function like(data) {
 }
 
 export function follow(data) {
-  const user = requireUser(data, "follow");
+  const user = requireUser(data, "follow", "writeUsers");
   const targetID = requireTarget(targetUserIDs.filter((id) => id !== user.id), "TARGET_USER_IDS");
   const response = http.put(
     `${baseURL}/api/users/me/following/${targetID}`,
@@ -205,7 +221,7 @@ export function follow(data) {
 }
 
 export function publish(data) {
-  const user = requireUser(data, "publish");
+  const user = requireUser(data, "publish", "writeUsers");
   const response = http.post(
     `${baseURL}/api/videos`,
     JSON.stringify({
@@ -292,14 +308,14 @@ function nextCursor(scene) {
   return cursors[scene] || "";
 }
 
-function userFor(data) {
-  if (!data || !Array.isArray(data.users) || data.users.length === 0) return null;
-  return data.users[(__VU - 1) % data.users.length];
+function userFor(data, pool) {
+  if (!data || !Array.isArray(data[pool]) || data[pool].length === 0) return null;
+  return data[pool][(__VU - 1) % data[pool].length];
 }
 
-function requireUser(data, operation) {
-  const user = userFor(data);
-  if (!user) throw new Error(`${operation} requires at least one authenticated account`);
+function requireUser(data, operation, pool) {
+  const user = userFor(data, pool);
+  if (!user) throw new Error(`${operation} requires at least one account in ${pool}`);
   return user;
 }
 
@@ -360,16 +376,35 @@ function recommendationGovernanceCounters() {
   return counters;
 }
 
-function parseAccounts() {
+function parseDefaultAccounts() {
   if (__ENV.ACCOUNTS_JSON) {
-    const parsed = JSON.parse(__ENV.ACCOUNTS_JSON);
-    if (!Array.isArray(parsed)) throw new Error("ACCOUNTS_JSON must be a JSON array");
-    return parsed.filter((item) => item && item.account && item.password);
+    return parseAccountsJSON("ACCOUNTS_JSON", __ENV.ACCOUNTS_JSON);
   }
   if (__ENV.ACCOUNT && __ENV.PASSWORD) {
     return [{ account: __ENV.ACCOUNT, password: __ENV.PASSWORD }];
   }
   return [];
+}
+
+function parseAccountPool(name, fallback) {
+  return __ENV[name] ? parseAccountsJSON(name, __ENV[name]) : fallback;
+}
+
+function parseAccountsJSON(name, content) {
+  const parsed = JSON.parse(content);
+  if (!Array.isArray(parsed)) throw new Error(`${name} must be a JSON array`);
+  return parsed.filter((item) => item && item.account && item.password);
+}
+
+function assertDisjointPools(readPool, writePool) {
+  const accountKey = (account) => String(account).trim().toLowerCase();
+  const readers = new Set(readPool.map((item) => accountKey(item.account)));
+  const overlap = writePool
+    .map((item) => item.account)
+    .filter((account) => readers.has(accountKey(account)));
+  if (overlap.length > 0) {
+    throw new Error(`read/write account pools must be disjoint for ${profile}: ${overlap.join(",")}`);
+  }
 }
 
 function idList(name) {

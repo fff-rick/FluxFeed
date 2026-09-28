@@ -20,7 +20,6 @@ import (
 
 const hotScoreExpression = "COALESCE(vs.like_count, 0) * 3 + COALESCE(vs.comment_count, 0) * 5 + COALESCE(vs.favorite_count, 0) * 4"
 const positiveEventWindow = 30 * 24 * time.Hour
-const negativeFeedbackWindow = 30 * 24 * time.Hour
 const profileSignalLimit = 200
 
 type Repository struct {
@@ -45,7 +44,7 @@ func New(db *gorm.DB) *Repository {
 
 func feedbackFilter(videoIDColumn string, authorIDColumn string) string {
 	return fmt.Sprintf(`NOT EXISTS (
-		SELECT 1 FROM video_view_events AS negative_video_event
+		SELECT 1 FROM video_view_events AS negative_video_event FORCE INDEX (idx_user_event_created_video)
 		WHERE negative_video_event.user_id = ?
 		  AND negative_video_event.video_id = %s
 		  AND negative_video_event.created_at >= ?
@@ -53,7 +52,7 @@ func feedbackFilter(videoIDColumn string, authorIDColumn string) string {
 	)
 	AND %s NOT IN (
 		SELECT hidden_video.author_id
-		FROM video_view_events AS hidden_event
+		FROM video_view_events AS hidden_event FORCE INDEX (idx_user_event_created_video)
 		JOIN video AS hidden_video ON hidden_video.id = hidden_event.video_id
 		WHERE hidden_event.user_id = ?
 		  AND hidden_event.created_at >= ?
@@ -62,7 +61,7 @@ func feedbackFilter(videoIDColumn string, authorIDColumn string) string {
 }
 
 func applyFeedbackFilter(query *gorm.DB, userID int64, videoIDColumn string, authorIDColumn string) *gorm.DB {
-	cutoff := time.Now().Add(-negativeFeedbackWindow)
+	cutoff := time.Now().Add(-domainrecommendation.NegativeFeedbackWindow)
 	return query.Where(feedbackFilter(videoIDColumn, authorIDColumn),
 		userID, cutoff, videoNegativeEventTypes(),
 		userID, cutoff, domainexposure.EventTypeHideAuthor,
@@ -79,13 +78,7 @@ func (r *Repository) ListCandidatesBySource(ctx context.Context, userID int64, s
 		Table("video AS v").
 		Select("v.id AS video_id, v.author_id, ("+hotScoreExpression+") AS hot_score, v.published_at").
 		Joins("LEFT JOIN video_stat AS vs ON vs.video_id = v.id").
-		Joins(
-			"LEFT JOIN exposures AS e ON e.user_id = ? AND e.video_id = v.id AND e.last_exposed_at >= ?",
-			userID,
-			time.Now().Add(-domainrecommendation.RecentExposureWindow),
-		).
-		Where("v.status = ? AND v.published_at IS NOT NULL AND e.video_id IS NULL", domainvideo.StatusPublished)
-	query = applyFeedbackFilter(query, userID, "v.id", "v.author_id")
+		Where("v.status = ? AND v.published_at IS NOT NULL", domainvideo.StatusPublished)
 	switch source {
 	case domainrecommendation.RecallSourceHot:
 		query = query.Order("hot_score DESC").Order("v.published_at DESC")
@@ -95,8 +88,9 @@ func (r *Repository) ListCandidatesBySource(ctx context.Context, userID int64, s
 		query = query.Joins("JOIN user_follow AS f ON f.target_user_id = v.author_id AND f.user_id = ? AND f.status = ?", userID, domainrelation.FollowStatusActive).
 			Order("v.published_at DESC")
 	case domainrecommendation.RecallSourceInterest, domainrecommendation.RecallSourceSimilar:
-		// ponytail: 应用层对最多 500 个向量做余弦召回；视频规模需要 ANN 时替换这里。
-		query = query.Joins("JOIN video_embedding AS ve ON ve.video_id = v.id AND ve.model = ?", domainembedding.HashNgramModel).
+		// 从发布时间索引先取有界视频，避免优化器从同模型的全量 embedding 开始扫描。
+		// ponytail: 应用层对有界向量做余弦召回；视频规模需要 ANN 时替换这里。
+		query = query.Joins("STRAIGHT_JOIN video_embedding AS ve ON ve.video_id = v.id AND ve.model = ?", domainembedding.HashNgramModel).
 			Order("v.published_at DESC")
 	case domainrecommendation.RecallSourceCollaborative:
 		// ponytail: 30 天窗口内在线聚合共同观看用户；数据量增大后物化 item-item 共现表。
@@ -139,6 +133,37 @@ func (r *Repository) ListCandidatesBySource(ctx context.Context, userID int64, s
 		))
 	}
 	return candidates, nil
+}
+
+func (r *Repository) ListNegativeCandidateExclusions(ctx context.Context, userID int64, videoIDs []int64, authorIDs []int64, since time.Time) (*domainrecommendation.CandidateExclusions, error) {
+	exclusions := &domainrecommendation.CandidateExclusions{
+		VideoIDs:  []int64{},
+		AuthorIDs: []int64{},
+	}
+	if len(videoIDs) > 0 {
+		err := r.db.WithContext(ctx).
+			Table("video_view_events FORCE INDEX (idx_user_event_created_video)").
+			Distinct("video_id").
+			Where("user_id = ? AND video_id IN ? AND created_at >= ? AND event_type IN ?", userID, videoIDs, since, videoNegativeEventTypes()).
+			Pluck("video_id", &exclusions.VideoIDs).
+			Error
+		if err != nil {
+			return nil, err
+		}
+	}
+	if len(authorIDs) > 0 {
+		err := r.db.WithContext(ctx).
+			Table("video_view_events AS hidden_event FORCE INDEX (idx_user_event_created_video)").
+			Distinct("hidden_video.author_id").
+			Joins("JOIN video AS hidden_video ON hidden_video.id = hidden_event.video_id").
+			Where("hidden_event.user_id = ? AND hidden_video.author_id IN ? AND hidden_event.created_at >= ? AND hidden_event.event_type = ?", userID, authorIDs, since, domainexposure.EventTypeHideAuthor).
+			Pluck("hidden_video.author_id", &exclusions.AuthorIDs).
+			Error
+		if err != nil {
+			return nil, err
+		}
+	}
+	return exclusions, nil
 }
 
 func (r *Repository) ListRecentPositiveVideoIDs(ctx context.Context, userID int64, limit int) ([]int64, error) {
