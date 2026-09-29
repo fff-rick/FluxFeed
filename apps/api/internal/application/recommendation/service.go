@@ -11,6 +11,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -19,6 +20,7 @@ import (
 const defaultLimit = 10
 const recallPerSource = 100
 const candidateOverfetchFactor = 2
+const hotCandidateCacheTTL = 5 * time.Second
 const preRankLimit = 200
 const defaultRankLimit = 50
 
@@ -27,8 +29,12 @@ var ErrLoadExposureDecisionsFailed = errors.New("failed to load exposure decisio
 var ErrSaveRecommendationExposureFailed = errors.New("failed to save recommendation exposure")
 
 type Service struct {
-	repo domainrecommendation.Repository
-	now  func() time.Time
+	repo                  domainrecommendation.Repository
+	now                   func() time.Time
+	hotCandidateMu        sync.Mutex
+	hotCandidates         []*domainrecommendation.Candidate
+	hotCandidateLimit     int
+	hotCandidatesExpireAt time.Time
 }
 
 type Option func(*Service)
@@ -172,7 +178,7 @@ func (s *Service) recallCandidates(ctx context.Context, userID int64) ([]*domain
 		group.Go(func() error {
 			startedAt := time.Now()
 			limit := recallPerSource * candidateOverfetchFactor
-			candidates, err := s.repo.ListCandidatesBySource(groupCtx, userID, source, limit)
+			candidates, err := s.listCandidatesBySource(groupCtx, userID, source, limit)
 			results[index] = recallResult{candidates: candidates, err: err}
 			inframetrics.ObserveRecommendationRecall(source, len(candidates), time.Since(startedAt), err)
 			return nil
@@ -227,6 +233,41 @@ func (s *Service) recallCandidates(ctx context.Context, userID int64) ([]*domain
 		inframetrics.ObserveGovernance("recommendation", "partial_recall")
 	}
 	return mergeRecallPools(pools), nil
+}
+
+func (s *Service) listCandidatesBySource(ctx context.Context, userID int64, source string, limit int) ([]*domainrecommendation.Candidate, error) {
+	if source != domainrecommendation.RecallSourceHot {
+		return s.repo.ListCandidatesBySource(ctx, userID, source, limit)
+	}
+
+	s.hotCandidateMu.Lock()
+	defer s.hotCandidateMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if time.Now().Before(s.hotCandidatesExpireAt) && s.hotCandidateLimit >= limit {
+		return cloneCandidates(s.hotCandidates, limit), nil
+	}
+	candidates, err := s.repo.ListCandidatesBySource(ctx, userID, source, limit)
+	if err != nil {
+		return nil, err
+	}
+	s.hotCandidates = cloneCandidates(candidates, len(candidates))
+	s.hotCandidateLimit = limit
+	s.hotCandidatesExpireAt = time.Now().Add(hotCandidateCacheTTL)
+	// ponytail: 进程内 5 秒快照适合当前单 API；多副本排序负载重新成为瓶颈时再迁移到 Redis。
+	return candidates, nil
+}
+
+func cloneCandidates(candidates []*domainrecommendation.Candidate, limit int) []*domainrecommendation.Candidate {
+	cloned := make([]*domainrecommendation.Candidate, min(len(candidates), max(limit, 0)))
+	for index := range cloned {
+		if candidates[index] != nil {
+			value := *candidates[index]
+			cloned[index] = &value
+		}
+	}
+	return cloned
 }
 
 func (s *Service) filterRecallPools(ctx context.Context, userID int64, pools [][]*domainrecommendation.Candidate) error {
