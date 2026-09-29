@@ -18,13 +18,43 @@ type degradedRecommendationRepo struct {
 	limits          chan int
 	exposureCalls   *int
 	exclusionCalls  *int
+	hotCalls        *int
 }
 
 func (r degradedRecommendationRepo) ListCandidatesBySource(_ context.Context, _ int64, source string, limit int) ([]*domainrecommendation.Candidate, error) {
+	if source == domainrecommendation.RecallSourceHot && r.hotCalls != nil {
+		*r.hotCalls++
+	}
 	if r.limits != nil {
 		r.limits <- limit
 	}
 	return r.candidates[source], r.candidateErrors[source]
+}
+
+func TestHotRecallCandidatesAreCachedAndCloned(t *testing.T) {
+	hotCalls := 0
+	repo := degradedRecommendationRepo{
+		candidates: map[string][]*domainrecommendation.Candidate{
+			domainrecommendation.RecallSourceHot: {
+				domainrecommendation.RestoreCandidate(1, 10, 0, 0, 100, 0, domainrecommendation.RecallSourceHot, time.Now()),
+			},
+		},
+		hotCalls: &hotCalls,
+	}
+	service := New(repo)
+
+	first, err := service.listCandidatesBySource(context.Background(), 1, domainrecommendation.RecallSourceHot, 200)
+	if err != nil || len(first) != 1 {
+		t.Fatalf("unexpected first hot recall: %+v, err=%v", first, err)
+	}
+	first[0].HotScore = 0
+	second, err := service.listCandidatesBySource(context.Background(), 2, domainrecommendation.RecallSourceHot, 200)
+	if err != nil || len(second) != 1 || second[0].HotScore != 100 {
+		t.Fatalf("unexpected cached hot recall: %+v, err=%v", second, err)
+	}
+	if hotCalls != 1 {
+		t.Fatalf("expected one hot repository query, got %d", hotCalls)
+	}
 }
 func (r degradedRecommendationRepo) ListRecentPositiveVideoIDs(context.Context, int64, int) ([]int64, error) {
 	return nil, nil
