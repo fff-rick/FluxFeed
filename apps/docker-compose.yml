@@ -3,10 +3,12 @@ services:
     image: mysql:8.4
     container_name: fluxfeed-mysql
     environment:
-      MYSQL_ROOT_PASSWORD: sealos123
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD in .env}
       MYSQL_DATABASE: FluxFeed
-    ports:
-      - "3307:3306"
+      MYSQL_USER: ${MYSQL_USER:?set MYSQL_USER in .env}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?set MYSQL_PASSWORD in .env}
+    # ports:
+    #   - "3307:3306"
     volumes:
       - mysql_data:/var/lib/mysql
     healthcheck:
@@ -19,6 +21,10 @@ services:
   redis:
     image: redis:7.4-alpine
     container_name: fluxfeed-redis
+    command: ["sh", "-c", "exec redis-server --appendonly yes --requirepass \"$$REDIS_PASSWORD\""]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}
+      REDISCLI_AUTH: ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}
     ports:
       - "6379:6379"
     volumes:
@@ -32,6 +38,9 @@ services:
   rabbitmq:
     image: rabbitmq:3.13-management-alpine
     container_name: fluxfeed-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:?set RABBITMQ_USER in .env}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?set RABBITMQ_PASSWORD in .env}
     ports:
       - "5672:5672"
       - "15672:15672"
@@ -91,6 +100,15 @@ services:
       - ./api/configs/config.docker.yaml:/app/configs/config.yaml:ro
       - api_uploads:/app/uploads
     environment:
+      FLUXFEED_ENV: development
+      FLUXFEED_JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+      FLUXFEED_INTERNAL_TOKEN: ${INTERNAL_TOKEN:?set INTERNAL_TOKEN in .env}
+      ADMIN: ${ADMIN:?set ADMIN in .env}
+      ADMIN_PW: ${ADMIN_PW:?set ADMIN_PW in .env}
+      FLUXFEED_DATABASE_USER: ${MYSQL_USER:?set MYSQL_USER in .env}
+      FLUXFEED_DATABASE_PASSWORD: ${MYSQL_PASSWORD:?set MYSQL_PASSWORD in .env}
+      FLUXFEED_REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}
+      FLUXFEED_RABBITMQ_URL: amqp://${RABBITMQ_USER:?set RABBITMQ_USER in .env}:${RABBITMQ_PASSWORD:?set RABBITMQ_PASSWORD in .env}@rabbitmq:5672/
       OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4317
       OTEL_EXPORTER_OTLP_INSECURE: "true"
     healthcheck:
@@ -120,6 +138,13 @@ services:
     volumes:
       - ./api/configs/config.docker.yaml:/app/configs/config.yaml:ro
     environment:
+      FLUXFEED_ENV: development
+      FLUXFEED_JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+      FLUXFEED_INTERNAL_TOKEN: ${INTERNAL_TOKEN:?set INTERNAL_TOKEN in .env}
+      FLUXFEED_DATABASE_USER: ${MYSQL_USER:?set MYSQL_USER in .env}
+      FLUXFEED_DATABASE_PASSWORD: ${MYSQL_PASSWORD:?set MYSQL_PASSWORD in .env}
+      FLUXFEED_REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}
+      FLUXFEED_RABBITMQ_URL: amqp://${RABBITMQ_USER:?set RABBITMQ_USER in .env}:${RABBITMQ_PASSWORD:?set RABBITMQ_PASSWORD in .env}@rabbitmq:5672/
       OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4317
       OTEL_EXPORTER_OTLP_INSECURE: "true"
 
@@ -166,10 +191,10 @@ services:
       - prometheus
       - tempo
     ports:
-      - "3000:3000"
+      - "13000:3000"
     environment:
-      GF_SECURITY_ADMIN_USER: admin
-      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:?set GRAFANA_ADMIN_USER in .env}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env}
       GF_USERS_ALLOW_SIGN_UP: "false"
       GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
       GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"

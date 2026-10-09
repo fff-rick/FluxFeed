@@ -4,6 +4,7 @@ import (
 	applicationvideo "FluxFeed/internal/application/video"
 	domainvideo "FluxFeed/internal/domain/video"
 	interfaceshttpmiddleware "FluxFeed/internal/interfaces/http/middleware"
+	"context"
 	"errors"
 	"net/http"
 	"strconv"
@@ -15,13 +16,19 @@ import (
 const defaultListLimit = 20
 
 type Handler struct {
-	service *applicationvideo.Service
+	service    *applicationvideo.Service
+	visibility VideoVisibility
+}
+type VideoVisibility interface {
+	VideoVisible(context.Context, int64, int64) (bool, error)
+	UsersVisible(context.Context, int64, int64) (bool, error)
 }
 
 // New 注入视频应用服务。
 func New(service *applicationvideo.Service) *Handler {
 	return &Handler{service: service}
 }
+func (h *Handler) SetVisibility(value VideoVisibility) { h.visibility = value }
 
 // Create 处理发布视频请求，用户身份来自 JWT，上行数据来自 JSON 请求体。
 func (h *Handler) Create(c *gin.Context) {
@@ -57,7 +64,93 @@ func (h *Handler) Create(c *gin.Context) {
 		// 幂等重放返回已有资源，使用 200 表示本次没有新建记录。
 		status = http.StatusOK
 	}
+	if result.Created {
+		status = http.StatusAccepted
+	}
 	c.JSON(status, videoResponseFromDomain(result.Video))
+}
+
+func (h *Handler) CreateDraft(c *gin.Context) {
+	userID, ok := userIDFromContext(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid access token"})
+		return
+	}
+	var req CreateVideoRequest
+	if c.ShouldBindJSON(&req) != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+	result, err := h.service.CreateDraft(c.Request.Context(), userID, req.Title, req.Description, req.MediaURL, req.CoverURL, c.GetHeader("Idempotency-Key"))
+	if err != nil {
+		writeVideoError(c, err)
+		return
+	}
+	c.JSON(http.StatusCreated, videoResponseFromDomain(result.Video))
+}
+func (h *Handler) UpdateDraft(c *gin.Context) {
+	userID, ok := userIDFromContext(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid access token"})
+		return
+	}
+	videoID, err := parsePositiveInt64(c.Param("videoId"))
+	if err != nil {
+		writeVideoError(c, err)
+		return
+	}
+	var req CreateVideoRequest
+	if c.ShouldBindJSON(&req) != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+	video, err := h.service.UpdateDraft(c.Request.Context(), userID, videoID, req.Title, req.Description, req.MediaURL, req.CoverURL)
+	if err != nil {
+		writeVideoError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, videoResponseFromDomain(video))
+}
+func (h *Handler) SubmitDraft(c *gin.Context) {
+	userID, ok := userIDFromContext(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid access token"})
+		return
+	}
+	videoID, err := parsePositiveInt64(c.Param("videoId"))
+	if err != nil {
+		writeVideoError(c, err)
+		return
+	}
+	video, err := h.service.SubmitDraft(c.Request.Context(), userID, videoID)
+	if err != nil {
+		writeVideoError(c, err)
+		return
+	}
+	c.JSON(http.StatusAccepted, videoResponseFromDomain(video))
+}
+func (h *Handler) Update(c *gin.Context) {
+	userID, ok := userIDFromContext(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid access token"})
+		return
+	}
+	videoID, err := parsePositiveInt64(c.Param("videoId"))
+	if err != nil {
+		writeVideoError(c, err)
+		return
+	}
+	var req CreateVideoRequest
+	if c.ShouldBindJSON(&req) != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+	video, err := h.service.UpdateAndResubmit(c.Request.Context(), userID, videoID, req.Title, req.Description, req.MediaURL, req.CoverURL)
+	if err != nil {
+		writeVideoError(c, err)
+		return
+	}
+	c.JSON(http.StatusAccepted, videoResponseFromDomain(video))
 }
 
 // Get 查询公开视频详情，videoId 来自 RESTful 路径参数。
@@ -66,6 +159,18 @@ func (h *Handler) Get(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid video id"})
 		return
+	}
+	if h.visibility != nil {
+		viewerID, _ := userIDFromContext(c)
+		visible, checkErr := h.visibility.VideoVisible(c.Request.Context(), viewerID, videoID)
+		if checkErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+			return
+		}
+		if !visible {
+			c.JSON(http.StatusNotFound, gin.H{"error": "video not found"})
+			return
+		}
 	}
 
 	video, err := h.service.Get(c.Request.Context(), videoID)
@@ -106,6 +211,18 @@ func (h *Handler) ListByAuthor(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user id"})
 		return
 	}
+	if h.visibility != nil {
+		viewerID, _ := userIDFromContext(c)
+		visible, checkErr := h.visibility.UsersVisible(c.Request.Context(), viewerID, authorID)
+		if checkErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
+			return
+		}
+		if !visible {
+			c.JSON(http.StatusOK, videoListResponse{Items: []videoResponse{}, Limit: defaultListLimit, Offset: 0})
+			return
+		}
+	}
 
 	limit, offset, err := parsePagination(c)
 	if err != nil {
@@ -136,7 +253,7 @@ func (h *Handler) ListMine(c *gin.Context) {
 		return
 	}
 
-	videos, err := h.service.ListByAuthor(c.Request.Context(), userID, limit, offset)
+	videos, err := h.service.ListMine(c.Request.Context(), userID, limit, offset)
 	if err != nil {
 		writeVideoError(c, err)
 		return
@@ -195,19 +312,23 @@ func parsePagination(c *gin.Context) (int, int, error) {
 // videoResponseFromDomain 把领域视频转换成 HTTP JSON 响应。
 func videoResponseFromDomain(video *domainvideo.Video) videoResponse {
 	return videoResponse{
-		ID:            video.ID,
-		AuthorID:      video.AuthorID,
-		Title:         video.Title,
-		Description:   video.Description,
-		MediaURL:      video.MediaURL,
-		CoverURL:      video.CoverURL,
-		Status:        video.Status,
-		LikeCount:     video.LikeCount,
-		CommentCount:  video.CommentCount,
-		FavoriteCount: video.FavoriteCount,
-		PublishedAt:   video.PublishedAt,
-		CreatedAt:     video.CreatedAt,
-		UpdatedAt:     video.UpdatedAt,
+		ID:               video.ID,
+		AuthorID:         video.AuthorID,
+		Title:            video.Title,
+		Description:      video.Description,
+		MediaURL:         video.MediaURL,
+		CoverURL:         video.CoverURL,
+		Status:           video.Status,
+		StatusName:       domainvideo.StatusName(video.Status),
+		ReviewReasonCode: video.ReviewReasonCode,
+		ReviewReason:     video.ReviewReason,
+		CanAppeal:        video.Status == domainvideo.StatusRejected,
+		LikeCount:        video.LikeCount,
+		CommentCount:     video.CommentCount,
+		FavoriteCount:    video.FavoriteCount,
+		PublishedAt:      video.PublishedAt,
+		CreatedAt:        video.CreatedAt,
+		UpdatedAt:        video.UpdatedAt,
 	}
 }
 

@@ -168,6 +168,10 @@ func writeRelationError(c *gin.Context, err error) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "target user not found"})
 		return
 	}
+	if errors.Is(err, applicationrelation.ErrRelationBlocked) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "relation blocked"})
+		return
+	}
 	c.JSON(http.StatusInternalServerError, gin.H{"error": "internal server error"})
 }
 

@@ -24,13 +24,22 @@ var ErrSaveInteractionFailed = errors.New("failed to save interaction")
 var ErrUpdateInteractionFailed = errors.New("failed to update interaction")
 
 type Service struct {
-	repo             domaininteraction.Repository
-	hotScoreRecorder HotScoreRecorder
-	statCache        StatCache
-	actionStateStore ActionStateStore
-	actionPublisher  ActionEventPublisher
-	commentPublisher CommentEventPublisher
-	messageWriter    MessageWriter
+	repo              domaininteraction.Repository
+	hotScoreRecorder  HotScoreRecorder
+	statCache         StatCache
+	actionStateStore  ActionStateStore
+	actionPublisher   ActionEventPublisher
+	commentPublisher  CommentEventPublisher
+	messageWriter     MessageWriter
+	reviewer          CommentReviewSubmitter
+	commentVisibility CommentVisibilityFilter
+}
+
+type CommentReviewSubmitter interface {
+	SubmitComment(context.Context, *domaininteraction.Comment) error
+}
+type CommentVisibilityFilter interface {
+	FilterVisibleComments(context.Context, int64, []*domaininteraction.Comment) ([]*domaininteraction.Comment, error)
 }
 
 // HotScoreRecorder 把互动变化投递到热榜分钟桶。
@@ -162,6 +171,13 @@ func WithMessageWriter(writer MessageWriter) Option {
 	}
 }
 
+func WithCommentReviewSubmitter(reviewer CommentReviewSubmitter) Option {
+	return func(s *Service) { s.reviewer = reviewer }
+}
+func WithCommentVisibility(filter CommentVisibilityFilter) Option {
+	return func(s *Service) { s.commentVisibility = filter }
+}
+
 // Like 设置用户对视频的点赞状态为有效。
 func (s *Service) Like(ctx context.Context, userID int64, videoID int64, idempotencyKey string) (*ActionResult, error) {
 	return s.setAction(ctx, userID, videoID, domaininteraction.ActionTypeLike, true, idempotencyKey)
@@ -212,6 +228,11 @@ func (s *Service) CreateComment(ctx context.Context, userID int64, videoID int64
 		}
 		return nil, ErrSaveInteractionFailed
 	}
+	if s.reviewer != nil {
+		if err := s.reviewer.SubmitComment(ctx, created); err != nil {
+			return nil, ErrSaveInteractionFailed
+		}
+	}
 	s.recordHotScore(ctx, created.VideoID, delta*hotScoreCommentWeight)
 	s.syncCommentCount(ctx, created.VideoID, count)
 	if delta > 0 {
@@ -226,6 +247,9 @@ func (s *Service) CreateComment(ctx context.Context, userID int64, videoID int64
 
 // ListComments 使用游标分页查询评论，返回下一页游标和 has_more。
 func (s *Service) ListComments(ctx context.Context, videoID int64, cursor string, limit int) (*CommentListResult, error) {
+	return s.ListCommentsForViewer(ctx, 0, videoID, cursor, limit)
+}
+func (s *Service) ListCommentsForViewer(ctx context.Context, viewerID, videoID int64, cursor string, limit int) (*CommentListResult, error) {
 	if videoID <= 0 {
 		return nil, domaininteraction.ErrInvalidVideoID
 	}
@@ -240,6 +264,12 @@ func (s *Service) ListComments(ctx context.Context, videoID int64, cursor string
 	items, err := s.repo.ListComments(ctx, videoID, parsedCursor, limit+1)
 	if err != nil {
 		return nil, ErrLoadInteractionFailed
+	}
+	if s.commentVisibility != nil {
+		items, err = s.commentVisibility.FilterVisibleComments(ctx, viewerID, items)
+		if err != nil {
+			return nil, ErrLoadInteractionFailed
+		}
 	}
 
 	hasMore := len(items) > limit

@@ -270,9 +270,7 @@ func (r *memoryInteractionRepo) CreateComment(ctx context.Context, comment *doma
 		r.commentIdem[memoryInteractionCommentIdemKey(comment.UserID, comment.IdempotencyKey)] = comment.ID
 	}
 	stat := r.stats[comment.VideoID]
-	stat.CommentCount++
-	r.stats[comment.VideoID] = stat
-	return cloneInteractionComment(comment), stat.CommentCount, 1, nil
+	return cloneInteractionComment(comment), stat.CommentCount, 0, nil
 }
 
 // FindCommentByUserAndIdempotencyKey 模拟评论创建接口的幂等查询。
@@ -330,14 +328,17 @@ func (r *memoryInteractionRepo) DeleteComment(ctx context.Context, commentID int
 	}
 	delta := 0
 	if comment.Status != domaininteraction.CommentStatusDeleted {
+		wasPublished := comment.Status == domaininteraction.CommentStatusNormal
 		comment.Status = domaininteraction.CommentStatusDeleted
 		comment.UpdatedAt = time.Now()
-		delta = -1
-		stat := r.stats[comment.VideoID]
-		if stat.CommentCount > 0 {
-			stat.CommentCount--
+		if wasPublished {
+			delta = -1
+			stat := r.stats[comment.VideoID]
+			if stat.CommentCount > 0 {
+				stat.CommentCount--
+			}
+			r.stats[comment.VideoID] = stat
 		}
-		r.stats[comment.VideoID] = stat
 	}
 	return cloneInteractionComment(comment), r.stats[comment.VideoID].CommentCount, delta, nil
 }
@@ -389,19 +390,19 @@ func TestInteractionCommentFlow(t *testing.T) {
 	otherToken := signTestToken(t, jwtManager, 99)
 
 	createResponse := performVideoJSONRequest(router, http.MethodPost, "/api/videos/1001/comments", `{"content":" first comment "}`, commenterToken, "comment-1")
-	requireStatus(t, createResponse, http.StatusCreated)
+	requireStatus(t, createResponse, http.StatusAccepted)
 
 	var created interactionCommentAPIResponse
 	decodeJSON(t, createResponse, &created)
-	if created.ID == 0 || created.UserID != 77 || created.Content != "first comment" || created.CommentCount != 1 {
+	if created.ID == 0 || created.UserID != 77 || created.Content != "first comment" || created.CommentCount != 0 {
 		t.Fatalf("unexpected comment response: %+v", created)
 	}
 
 	replayResponse := performVideoJSONRequest(router, http.MethodPost, "/api/videos/1001/comments", `{"content":"changed"}`, commenterToken, "comment-1")
-	requireStatus(t, replayResponse, http.StatusCreated)
+	requireStatus(t, replayResponse, http.StatusAccepted)
 	var replayed interactionCommentAPIResponse
 	decodeJSON(t, replayResponse, &replayed)
-	if replayed.ID != created.ID || replayed.Content != created.Content || replayed.CommentCount != 1 {
+	if replayed.ID != created.ID || replayed.Content != created.Content || replayed.CommentCount != 0 {
 		t.Fatalf("unexpected replay comment response: %+v", replayed)
 	}
 
@@ -409,7 +410,7 @@ func TestInteractionCommentFlow(t *testing.T) {
 	requireStatus(t, listResponse, http.StatusOK)
 	var list interactionCommentListAPIResponse
 	decodeJSON(t, listResponse, &list)
-	if len(list.Items) != 1 || list.Items[0].ID != created.ID || list.Items[0].UserNickname != "user-77" {
+	if len(list.Items) != 0 {
 		t.Fatalf("unexpected comment list response: %+v", list)
 	}
 
@@ -486,7 +487,7 @@ func TestInteractionHotScoreRecorder(t *testing.T) {
 	if recorder.Score(1001) != 4 {
 		t.Fatalf("unexpected hot score: %d", recorder.Score(1001))
 	}
-	if recorder.EventCount() != 5 {
+	if recorder.EventCount() != 3 {
 		t.Fatalf("unexpected hot event count: %d", recorder.EventCount())
 	}
 }
@@ -501,8 +502,8 @@ func TestInteractionCommentSyncsStatCache(t *testing.T) {
 		t.Fatalf("create comment: %v", err)
 	}
 	stat := cache.StatForTest(1001)
-	if stat == nil || stat.CommentCount != 1 {
-		t.Fatalf("expected comment count cache to be 1, got %+v", stat)
+	if stat == nil || stat.CommentCount != 0 {
+		t.Fatalf("expected pending comment count cache to remain 0, got %+v", stat)
 	}
 
 	if _, err := service.DeleteComment(context.Background(), created.Comment.ID, 77, domainaccount.RoleUser); err != nil {
@@ -534,20 +535,14 @@ func TestInteractionMessageWriter(t *testing.T) {
 	}
 
 	messages := writer.Messages()
-	if len(messages) != 2 {
-		t.Fatalf("expected 2 messages, got %+v", messages)
+	if len(messages) != 1 {
+		t.Fatalf("expected only the like message before comment review, got %+v", messages)
 	}
 	if messages[0].UserID != 42 || messages[0].Type != "LIKE" {
 		t.Fatalf("unexpected like message: %+v", messages[0])
 	}
 	if messages[0].ActorID != 77 || messages[0].ActorNickname != memoryInteractionNickname(77) || messages[0].ActorAvatarURL != memoryInteractionAvatar(77) {
 		t.Fatalf("unexpected like actor: %+v", messages[0])
-	}
-	if messages[1].UserID != 42 || messages[1].Type != "COMMENT" {
-		t.Fatalf("unexpected comment message: %+v", messages[1])
-	}
-	if messages[1].ActorID != 77 || messages[1].ActorNickname != memoryInteractionNickname(77) || messages[1].ActorAvatarURL != memoryInteractionAvatar(77) {
-		t.Fatalf("unexpected comment actor: %+v", messages[1])
 	}
 }
 

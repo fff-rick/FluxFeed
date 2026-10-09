@@ -87,6 +87,9 @@ func (s *Service) Login(ctx context.Context, account, password string) (*LoginRe
 	if err := user.Authenticate(password); err != nil {
 		return nil, err
 	}
+	if user.Status != domainaccount.StatusNormal {
+		return nil, domainaccount.ErrInvalidCredentials
+	}
 
 	// token 内写入用户 ID 和角色，后续鉴权中间件会解析并放入请求上下文。
 	accessToken, err := s.signer.SignAccessToken(user.ID, user.Role)

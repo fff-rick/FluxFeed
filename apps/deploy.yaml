@@ -4,33 +4,39 @@ metadata:
   name: fluxfeed
 ---
 apiVersion: v1
-kind: Secret
+kind: ConfigMap
 metadata:
-  name: fluxfeed-secret
+  name: fluxfeed-config
   namespace: fluxfeed
-type: Opaque
-stringData:
-  mysql-root-password: sealos123
+data:
   api-config.yaml: |
+    environment: "development"
     port: 8080
     jwt:
-      secret: "replace-with-strong-secret"
+      secret: ""
       access_ttl: "15m"
+
+    internal:
+      token: ""
 
     database:
       host: "mysql"
       port: 3306
-      user: "root"
-      password: "sealos123"
+      user: ""
+      password: ""
       name: "FluxFeed"
+      tls: "false"
 
     redis:
       addr: "redis:6379"
       password: ""
       db: 0
 
+    kafka:
+      brokers: []
+
     rabbitmq:
-      url: "amqp://guest:guest@rabbitmq:5672/"
+      url: ""
       interaction_exchange: "fluxfeed.interaction"
       action_changed_queue: "fluxfeed.interaction.action_changed"
       action_changed_routing: "interaction.action_changed"
@@ -115,10 +121,20 @@ spec:
             - name: MYSQL_ROOT_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: fluxfeed-secret
+                  name: fluxfeed-secrets
                   key: mysql-root-password
             - name: MYSQL_DATABASE
               value: FluxFeed
+            - name: MYSQL_USER
+              valueFrom:
+                secretKeyRef:
+                  name: fluxfeed-secrets
+                  key: mysql-user
+            - name: MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: fluxfeed-secrets
+                  key: mysql-password
           volumeMounts:
             - name: mysql-data
               mountPath: /var/lib/mysql
@@ -179,6 +195,21 @@ spec:
         - name: redis
           image: redis:7.4-alpine
           imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - exec redis-server --appendonly yes --requirepass "$REDIS_PASSWORD"
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: fluxfeed-secrets
+                  key: redis-password
+            - name: REDISCLI_AUTH
+              valueFrom:
+                secretKeyRef:
+                  name: fluxfeed-secrets
+                  key: redis-password
           ports:
             - containerPort: 6379
           volumeMounts:
@@ -239,6 +270,17 @@ spec:
         - name: rabbitmq
           image: rabbitmq:3.13-management-alpine
           imagePullPolicy: IfNotPresent
+          env:
+            - name: RABBITMQ_DEFAULT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: fluxfeed-secrets
+                  key: rabbitmq-user
+            - name: RABBITMQ_DEFAULT_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: fluxfeed-secrets
+                  key: rabbitmq-password
           ports:
             - name: amqp
               containerPort: 5672
@@ -309,6 +351,39 @@ spec:
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
+          env:
+            - name: FLUXFEED_ENV
+              value: development
+            - name: FLUXFEED_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: fluxfeed-secrets
+                  key: jwt-secret
+            - name: FLUXFEED_INTERNAL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: fluxfeed-secrets
+                  key: internal-token
+            - name: FLUXFEED_DATABASE_USER
+              valueFrom:
+                secretKeyRef:
+                  name: fluxfeed-secrets
+                  key: mysql-user
+            - name: FLUXFEED_DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: fluxfeed-secrets
+                  key: mysql-password
+            - name: FLUXFEED_REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: fluxfeed-secrets
+                  key: redis-password
+            - name: FLUXFEED_RABBITMQ_URL
+              valueFrom:
+                secretKeyRef:
+                  name: fluxfeed-secrets
+                  key: rabbitmq-url
           volumeMounts:
             - name: api-config
               mountPath: /app/configs/config.yaml
@@ -334,8 +409,8 @@ spec:
             failureThreshold: 6
       volumes:
         - name: api-config
-          secret:
-            secretName: fluxfeed-secret
+          configMap:
+            name: fluxfeed-config
             items:
               - key: api-config.yaml
                 path: api-config.yaml
@@ -377,6 +452,39 @@ spec:
           imagePullPolicy: IfNotPresent
           command:
             - ./fluxfeed-worker
+          env:
+            - name: FLUXFEED_ENV
+              value: development
+            - name: FLUXFEED_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: fluxfeed-secrets
+                  key: jwt-secret
+            - name: FLUXFEED_INTERNAL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: fluxfeed-secrets
+                  key: internal-token
+            - name: FLUXFEED_DATABASE_USER
+              valueFrom:
+                secretKeyRef:
+                  name: fluxfeed-secrets
+                  key: mysql-user
+            - name: FLUXFEED_DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: fluxfeed-secrets
+                  key: mysql-password
+            - name: FLUXFEED_REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: fluxfeed-secrets
+                  key: redis-password
+            - name: FLUXFEED_RABBITMQ_URL
+              valueFrom:
+                secretKeyRef:
+                  name: fluxfeed-secrets
+                  key: rabbitmq-url
           volumeMounts:
             - name: api-config
               mountPath: /app/configs/config.yaml
@@ -384,8 +492,8 @@ spec:
               readOnly: true
       volumes:
         - name: api-config
-          secret:
-            secretName: fluxfeed-secret
+          configMap:
+            name: fluxfeed-config
             items:
               - key: api-config.yaml
                 path: api-config.yaml

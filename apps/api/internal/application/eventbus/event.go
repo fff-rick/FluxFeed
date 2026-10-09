@@ -9,16 +9,18 @@ import (
 )
 
 const (
-	TypeVideoPublished   = "VideoPublished"
-	TypeVideoExposed     = "VideoExposed"
-	TypeVideoViewed      = "VideoViewed"
-	TypeVideoLiked       = "VideoLiked"
-	TypeVideoUnliked     = "VideoUnliked"
-	TypeVideoCollected   = "VideoCollected"
-	TypeVideoUncollected = "VideoUncollected"
-	TypeVideoCommented   = "VideoCommented"
-	TypeUserFollowed     = "UserFollowed"
-	TypeUserUnfollowed   = "UserUnfollowed"
+	TypeVideoPublished           = "VideoPublished"
+	TypeVideoExposed             = "VideoExposed"
+	TypeVideoViewed              = "VideoViewed"
+	TypeVideoLiked               = "VideoLiked"
+	TypeVideoUnliked             = "VideoUnliked"
+	TypeVideoCollected           = "VideoCollected"
+	TypeVideoUncollected         = "VideoUncollected"
+	TypeVideoCommented           = "VideoCommented"
+	TypeUserFollowed             = "UserFollowed"
+	TypeUserUnfollowed           = "UserUnfollowed"
+	TypeContentReviewRequested   = "ContentReviewRequested"
+	TypeContentVisibilityChanged = "ContentVisibilityChanged"
 )
 
 var ErrInvalidEvent = errors.New("invalid event")

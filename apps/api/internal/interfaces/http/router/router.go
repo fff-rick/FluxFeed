@@ -2,6 +2,7 @@ package interfaceshttprouter
 
 import (
 	applicationaccount "FluxFeed/internal/application/account"
+	applicationeventbus "FluxFeed/internal/application/eventbus"
 	applicationexposure "FluxFeed/internal/application/exposure"
 	applicationfeed "FluxFeed/internal/application/feed"
 	applicationgovernance "FluxFeed/internal/application/governance"
@@ -19,6 +20,7 @@ import (
 	infraaccount "FluxFeed/internal/infra/persistence/account"
 	infraexposure "FluxFeed/internal/infra/persistence/exposure"
 	infrafeed "FluxFeed/internal/infra/persistence/feed"
+	infragovernance "FluxFeed/internal/infra/persistence/governance"
 	infrainteraction "FluxFeed/internal/infra/persistence/interaction"
 	inframessage "FluxFeed/internal/infra/persistence/message"
 	migration "FluxFeed/internal/infra/persistence/migration"
@@ -70,6 +72,9 @@ func Register(g *gin.Engine, cfg *infraconfig.Config, db *sql.DB) error {
 	if err := migration.AutoMigrate(gormDB); err != nil {
 		return err
 	}
+	if err := infragovernance.EnsureAdmin(gormDB, cfg.Admin.Account, cfg.Admin.Password); err != nil {
+		return err
+	}
 
 	// JWT Manager 同时被账号服务用于签发 token，也被鉴权中间件用于校验 token。
 	jwtManager, err := infrajwt.NewManager(cfg.JWT.Secret, cfg.JWT.AccessTTL)
@@ -103,13 +108,12 @@ func Register(g *gin.Engine, cfg *infraconfig.Config, db *sql.DB) error {
 	if cfg.Redis.Addr != "" {
 		redisClient := infracache.NewRedisClient(cfg.Redis)
 		feedCache = infracache.NewFeedCache(redisClient)
+		videoOptions = append(videoOptions, applicationvideo.WithVisibilityInvalidator(feedCache))
 		feedOptions = append(feedOptions, applicationfeed.WithFeedCache(feedCache))
 		interactionOptions = append(interactionOptions, applicationinteraction.WithHotScoreRecorder(feedCache))
 		interactionOptions = append(interactionOptions, applicationinteraction.WithStatCache(feedCache))
 		exposureOptions = append(exposureOptions, applicationexposure.WithSeenRecorder(feedCache))
 	}
-	feedService := applicationfeed.New(feedRepo, feedOptions...)
-	feedHandler := interfaceshttpfeed.New(feedService)
 	interactionRepo := infrainteraction.New(gormDB)
 	exposureRepo := infraexposure.New(gormDB)
 	relationRepo := infrarelation.New(gormDB)
@@ -121,7 +125,27 @@ func Register(g *gin.Engine, cfg *infraconfig.Config, db *sql.DB) error {
 	playbackHandler := interfaceshttpplayback.New(playbackService)
 	outboxRepo := infraoutbox.New(gormDB)
 	outboxHandler := interfaceshttpoutbox.New(outboxRepo)
+	moderationService := infragovernance.New(gormDB, outboxRepo, normalizedTopic(cfg.Kafka.VideoTopic, "fluxfeed.video"), normalizedTopic(cfg.Kafka.InteractionTopic, "fluxfeed.interaction"))
+	moderationHandler := interfaceshttpgovernance.NewModeration(moderationService)
+	if feedCache != nil {
+		moderationService.SetVisibilityInvalidator(feedCache)
+	}
+	feedOptions = append(feedOptions, applicationfeed.WithVisibilityFilter(moderationService))
+	feedService := applicationfeed.New(feedRepo, feedOptions...)
+	feedHandler := interfaceshttpfeed.New(feedService)
+	videoOptions = append(videoOptions, applicationvideo.WithReviewSubmitter(moderationService))
+	interactionOptions = append(interactionOptions, applicationinteraction.WithCommentReviewSubmitter(moderationService))
+	interactionOptions = append(interactionOptions, applicationinteraction.WithCommentVisibility(moderationService))
 	eventPublisher := newApplicationEventPublisher(cfg)
+	if eventPublisher != nil {
+		if _, ok := eventPublisher.(applicationeventbus.Bus); !ok {
+			var comments applicationinteraction.CommentEventPublisher
+			if value, yes := eventPublisher.(applicationinteraction.CommentEventPublisher); yes {
+				comments = value
+			}
+			moderationService.SetPublishers(eventPublisher, comments)
+		}
+	}
 	if eventPublisher != nil {
 		if _, kafkaEnabled := eventPublisher.(*inframq.FeedEventBus); kafkaEnabled {
 			videoRepo.EnablePublishedOutbox(outboxRepo, normalizedTopic(cfg.Kafka.VideoTopic, "fluxfeed.video"))
@@ -141,7 +165,7 @@ func Register(g *gin.Engine, cfg *infraconfig.Config, db *sql.DB) error {
 	}
 	messageWriter := NewMessageWriter(messageService)
 	interactionOptions = append(interactionOptions, applicationinteraction.WithMessageWriter(messageWriter))
-	relationOptions := []applicationrelation.Option{applicationrelation.WithMessageWriter(messageWriter)}
+	relationOptions := []applicationrelation.Option{applicationrelation.WithMessageWriter(messageWriter), applicationrelation.WithBlockChecker(moderationService)}
 	if _, kafkaEnabled := eventPublisher.(*inframq.FeedEventBus); !kafkaEnabled {
 		publisher, ok := eventPublisher.(applicationrelation.FollowEventPublisher)
 		if ok {
@@ -150,6 +174,7 @@ func Register(g *gin.Engine, cfg *infraconfig.Config, db *sql.DB) error {
 	}
 	videoService := applicationvideo.New(videoRepo, videoOptions...)
 	videoHandler := interfaceshttpvideo.New(videoService)
+	videoHandler.SetVisibility(moderationService)
 	interactionService := applicationinteraction.New(interactionRepo, interactionOptions...)
 	interactionHandler := interfaceshttpinteraction.New(interactionService)
 	exposureService := applicationexposure.New(exposureRepo, exposureOptions...)
@@ -160,14 +185,14 @@ func Register(g *gin.Engine, cfg *infraconfig.Config, db *sql.DB) error {
 	relationService := applicationrelation.New(relationRepo, relationOptions...)
 	relationHandler := interfaceshttprelation.New(relationService)
 	uploadHandler := interfaceshttpupload.New("./uploads")
+	uploadHandler.SetAssetStore(moderationService)
 
 	g.GET("/health", HealthCheck)
 	g.GET("/metrics", gin.WrapH(promhttp.Handler()))
-	// 静态文件路由让上传后的文件可以通过 /uploads/... 访问。
-	g.Static("/uploads", "./uploads")
 
-	authMiddleware := interfaceshttpmiddleware.NewJWTAuth(jwtManager)
-	optionalAuthMiddleware := interfaceshttpmiddleware.NewOptionalJWTAuth(jwtManager)
+	authMiddleware := interfaceshttpmiddleware.NewJWTAuthWithAccount(jwtManager, moderationService.AccountActive)
+	optionalAuthMiddleware := interfaceshttpmiddleware.NewOptionalJWTAuthWithAccount(jwtManager, moderationService.AccountActive)
+	g.GET("/uploads/*filepath", optionalAuthMiddleware, uploadHandler.Serve)
 	api := g.Group("/api")
 
 	// RESTful 路由约定：路径表达资源，HTTP 方法表达动作。
@@ -186,20 +211,24 @@ func Register(g *gin.Engine, cfg *infraconfig.Config, db *sql.DB) error {
 	users.DELETE("/me/following/:targetUserId", authMiddleware, relationHandler.Unfollow)
 	users.GET("/me/following", authMiddleware, relationHandler.ListFollowing)
 	users.GET("/me/followers", authMiddleware, relationHandler.ListFollowers)
-	users.GET("/:userId", accountHandler.Get)
-	users.GET("/:userId/videos", videoHandler.ListByAuthor)
+	users.GET("/:userId", optionalAuthMiddleware, interfaceshttpgovernance.RequireUserVisible(moderationService, "userId"), accountHandler.Get)
+	users.GET("/:userId/videos", optionalAuthMiddleware, videoHandler.ListByAuthor)
 
 	// 视频是互动资源的父资源，点赞、收藏和评论都挂在具体视频下。
 	videos := api.Group("/videos")
 	videos.POST("", authMiddleware, videoHandler.Create)
-	videos.GET("/:videoId", videoHandler.Get)
+	videos.PATCH("/:videoId", authMiddleware, videoHandler.Update)
+	api.POST("/video-drafts", authMiddleware, videoHandler.CreateDraft)
+	api.PATCH("/video-drafts/:videoId", authMiddleware, videoHandler.UpdateDraft)
+	api.POST("/video-drafts/:videoId/submissions", authMiddleware, videoHandler.SubmitDraft)
+	videos.GET("/:videoId", optionalAuthMiddleware, videoHandler.Get)
 	videos.DELETE("/:videoId", authMiddleware, videoHandler.Delete)
 	videos.PUT("/:videoId/like", authMiddleware, interactionHandler.Like)
 	videos.DELETE("/:videoId/like", authMiddleware, interactionHandler.Unlike)
 	videos.PUT("/:videoId/favorite", authMiddleware, interactionHandler.Favorite)
 	videos.DELETE("/:videoId/favorite", authMiddleware, interactionHandler.Unfavorite)
 	videos.POST("/:videoId/comments", authMiddleware, interactionHandler.CreateComment)
-	videos.GET("/:videoId/comments", interactionHandler.ListComments)
+	videos.GET("/:videoId/comments", optionalAuthMiddleware, interactionHandler.ListComments)
 
 	uploads := api.Group("/uploads", authMiddleware)
 	uploads.POST("", uploadHandler.Create)
@@ -216,6 +245,26 @@ func Register(g *gin.Engine, cfg *infraconfig.Config, db *sql.DB) error {
 	api.GET("/playback-config", authMiddleware, playbackHandler.GetConfig)
 	api.GET("/preload-videos", authMiddleware, playbackHandler.ListPreloadVideos)
 	api.POST("/playback-qos-reports", authMiddleware, playbackHandler.CreateQoSReport)
+	api.POST("/reports", authMiddleware, moderationHandler.CreateReport)
+	api.GET("/reports/me", authMiddleware, moderationHandler.ListMyReports)
+	api.PUT("/users/me/blocks/:userId", authMiddleware, moderationHandler.Block)
+	api.DELETE("/users/me/blocks/:userId", authMiddleware, moderationHandler.Unblock)
+	api.POST("/appeals/:targetType/:targetId", authMiddleware, moderationHandler.CreateAppeal)
+	api.GET("/appeals/me", authMiddleware, moderationHandler.ListMyAppeals)
+
+	admin := api.Group("/admin", authMiddleware)
+	admin.GET("/reviews", interfaceshttpgovernance.RequirePermission(moderationService, "review.read"), moderationHandler.ListReviews)
+	admin.POST("/reviews/:reviewId/decisions", interfaceshttpgovernance.RequirePermission(moderationService, "review.decide"), moderationHandler.DecideReview)
+	admin.GET("/appeals", interfaceshttpgovernance.RequirePermission(moderationService, "appeal.read"), moderationHandler.ListAppeals)
+	admin.POST("/appeals/:appealId/decisions", interfaceshttpgovernance.RequirePermission(moderationService, "appeal.decide"), moderationHandler.DecideAppeal)
+	admin.GET("/reports", interfaceshttpgovernance.RequirePermission(moderationService, "report.read"), moderationHandler.ListReports)
+	admin.POST("/reports/:reportId/resolution", interfaceshttpgovernance.RequirePermission(moderationService, "report.resolve"), moderationHandler.ResolveReport)
+	admin.POST("/content/:targetType/:targetId/offline", interfaceshttpgovernance.RequirePermission(moderationService, "content.moderate"), moderationHandler.Offline)
+	admin.POST("/content/:targetType/:targetId/restore", interfaceshttpgovernance.RequirePermission(moderationService, "content.moderate"), moderationHandler.Restore)
+	admin.POST("/users/:userId/ban", interfaceshttpgovernance.RequirePermission(moderationService, "user.ban"), moderationHandler.Ban)
+	admin.POST("/users/:userId/unban", interfaceshttpgovernance.RequirePermission(moderationService, "user.ban"), moderationHandler.Unban)
+	admin.PUT("/users/:userId/role", interfaceshttpgovernance.RequirePermission(moderationService, "role.assign"), moderationHandler.AssignRole)
+	admin.GET("/audit-logs", interfaceshttpgovernance.RequirePermission(moderationService, "audit.read"), moderationHandler.ListAudit)
 
 	internal := g.Group("/internal")
 	internal.GET("/governance/degrade-switches", interfaceshttpmiddleware.NewInternalTokenAuth(cfg.Internal.Token), governanceHandler.List)
@@ -226,6 +275,7 @@ func Register(g *gin.Engine, cfg *infraconfig.Config, db *sql.DB) error {
 	internal.POST("/messages", interfaceshttpmiddleware.NewInternalTokenAuth(cfg.Internal.Token), messageHandler.Create)
 	internal.POST("/playback-qos-reports", interfaceshttpmiddleware.NewInternalTokenAuth(cfg.Internal.Token), playbackHandler.CreateInternalQoSReport)
 	internal.GET("/outbox-events", interfaceshttpmiddleware.NewInternalTokenAuth(cfg.Internal.Token), outboxHandler.List)
+	internal.POST("/moderation/results", interfaceshttpmiddleware.NewInternalTokenAuth(cfg.Internal.Token), moderationHandler.MachineResult)
 
 	return nil
 }

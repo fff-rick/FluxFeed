@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760" role="img">
+  <title>FluxFeed / Architecture</title>
+  <desc>High-concurrency video feed architecture with synchronous serving, asynchronous events, storage and observability.</desc>
+  <defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0 L8 4 L0 8" fill="#64748b"/></marker></defs>
+  <style>text{font-family:DejaVu Sans,Arial,sans-serif}.title{font-size:30px;font-weight:700;fill:#172033}.sub{font-size:14px;fill:#64748b}.label{font-size:18px;font-weight:700;fill:#172033}.detail{font-size:13px;fill:#526176}.edge{fill:none;stroke:#64748b;stroke-width:2;marker-end:url(#arrow)}.dash{stroke-dasharray:7 6}</style>
+  <rect width="1200" height="760" rx="20" fill="#f7f9fc"/>
+  <text x="40" y="54" class="title">FluxFeed / Architecture</text>
+  <text x="40" y="82" class="sub">Video feed delivery · recommendation · event-driven processing · observability</text>
+  <rect x="40" y="120" width="245" height="105" rx="12" fill="#edf5ff" stroke="#5b8ed8"/>
+  <text x="60" y="152" class="label">Clients</text><text x="60" y="178" class="detail">React + Vite Web App</text><text x="60" y="199" class="detail">REST API consumers</text>
+  <rect x="335" y="120" width="350" height="105" rx="12" fill="#edf5ff" stroke="#5b8ed8"/>
+  <text x="355" y="152" class="label">Gin API</text><text x="355" y="178" class="detail">JWT · rate limit · request timeout</text><text x="355" y="199" class="detail">Account / Video / Feed / Social / Governance</text>
+  <rect x="735" y="120" width="425" height="105" rx="12" fill="#fff6e7" stroke="#d9a148"/>
+  <text x="755" y="152" class="label">Observability</text><text x="755" y="178" class="detail">Prometheus metrics → Grafana dashboards</text><text x="755" y="199" class="detail">OpenTelemetry traces → Tempo</text>
+  <path class="edge" d="M285 172 H335"/><path class="edge dash" d="M685 172 H735"/>
+  <rect x="335" y="270" width="825" height="110" rx="12" fill="#ecf8f3" stroke="#59a78c"/>
+  <text x="355" y="302" class="label">Feed Core</text><text x="355" y="328" class="detail">FeedRouter → Timeline / Hot / Following / Recommend strategies</text><text x="355" y="350" class="detail">CandidateSource → Filter → Ranker → FeedAssembler</text>
+  <path class="edge" d="M510 225 V270"/>
+  <rect x="40" y="270" width="245" height="110" rx="12" fill="#f3efff" stroke="#9b80cf"/>
+  <text x="60" y="302" class="label">Application Services</text><text x="60" y="328" class="detail">Video / Interaction / Relation</text><text x="60" y="349" class="detail">Exposure / Playback / Message</text><text x="60" y="370" class="detail">Moderation / Recommendation</text>
+  <path class="edge" d="M285 325 H335"/>
+  <rect x="40" y="435" width="335" height="120" rx="12" fill="#edf5ff" stroke="#5b8ed8"/>
+  <text x="60" y="467" class="label">Serving Data</text><text x="60" y="493" class="detail">MySQL + GORM repositories</text><text x="60" y="514" class="detail">Redis feed cache / hot ranking</text><text x="60" y="535" class="detail">Local media uploads</text>
+  <rect x="425" y="435" width="335" height="120" rx="12" fill="#ecf8f3" stroke="#59a78c"/>
+  <text x="445" y="467" class="label">Reliable Events</text><text x="445" y="493" class="detail">Transactional Outbox</text><text x="445" y="514" class="detail">Kafka primary event bus</text><text x="445" y="535" class="detail">RabbitMQ compatibility path</text>
+  <rect x="810" y="435" width="350" height="120" rx="12" fill="#f3efff" stroke="#9b80cf"/>
+  <text x="830" y="467" class="label">Async Worker</text><text x="830" y="493" class="detail">Feed fan-out / counter updates</text><text x="830" y="514" class="detail">Embedding / feature updates</text><text x="830" y="535" class="detail">Recommendation feedback</text>
+  <path class="edge" d="M500 380 V410 H207 V435"/><path class="edge" d="M650 380 V435"/><path class="edge" d="M760 495 H810"/>
+  <rect x="40" y="605" width="335" height="95" rx="12" fill="#edf5ff" stroke="#5b8ed8"/>
+  <text x="60" y="637" class="label">Business State</text><text x="60" y="663" class="detail">Accounts · videos · relations · interactions</text>
+  <rect x="425" y="605" width="335" height="95" rx="12" fill="#ecf8f3" stroke="#59a78c"/>
+  <text x="445" y="637" class="label">Domain Events</text><text x="445" y="663" class="detail">Video · interaction · exposure · relation</text>
+  <rect x="810" y="605" width="350" height="95" rx="12" fill="#f3efff" stroke="#9b80cf"/>
+  <text x="830" y="637" class="label">Derived State</text><text x="830" y="663" class="detail">Inbox · counters · features · embeddings</text>
+  <path class="edge" d="M207 555 V605"/><path class="edge" d="M592 555 V605"/><path class="edge" d="M985 555 V605"/>
+  <text x="40" y="738" class="sub">Implementation overview; arrows describe the primary data flow, not a deployment benchmark.</text>
+</svg>

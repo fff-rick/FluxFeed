@@ -89,7 +89,7 @@ git status --short
 docker version
 docker compose version
 k6 version
-docker compose -f apps/docker-compose.yml images
+docker compose --env-file .env -f apps/docker-compose.yml images
 ```
 
 报告还需人工记录：
@@ -121,8 +121,8 @@ docker compose -f apps/docker-compose.yml images
 
 ```bash
 cd apps
-docker compose up -d --build
-docker compose ps
+docker compose --env-file ../.env up -d --build
+docker compose --env-file ../.env ps
 
 curl -fsS http://127.0.0.1:8080/health
 curl -fsS http://127.0.0.1:8080/metrics >/dev/null
@@ -571,6 +571,7 @@ governance
 
 ```bash
 docker compose \
+  --env-file .env \
   -f apps/docker-compose.yml \
   -f apps/docker-compose.performance.yml \
   up -d --build
@@ -583,6 +584,7 @@ export PERFORMANCE_API_PORT=18081
 export PERFORMANCE_BASE_URL=http://127.0.0.1:18081
 export BASE_URL=$PERFORMANCE_BASE_URL
 docker compose \
+  --env-file .env \
   -f apps/docker-compose.yml \
   -f apps/docker-compose.performance.yml \
   up -d --build

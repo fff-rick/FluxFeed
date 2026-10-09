@@ -6,10 +6,14 @@ import (
 )
 
 const (
-	StatusDraft     = 1
-	StatusPublished = 2
-	StatusOffline   = 3
-	StatusDeleted   = 4
+	StatusDraft         = 1
+	StatusPublished     = 2
+	StatusOffline       = 3
+	StatusDeleted       = 4
+	StatusProcessing    = 5
+	StatusPendingReview = 6
+	StatusRejected      = 7
+	StatusAppealPending = 8
 
 	MaxTitleLength          = 128
 	MaxDescriptionLength    = 512
@@ -18,24 +22,59 @@ const (
 
 // Video 是视频聚合根，包含内容信息、发布状态和统计快照。
 type Video struct {
-	ID             int64
-	AuthorID       int64
-	Title          string
-	Description    string
-	MediaURL       string
-	CoverURL       string
-	Status         int
-	LikeCount      int
-	CommentCount   int
-	FavoriteCount  int
-	PublishedAt    *time.Time
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
-	IdempotencyKey string
+	ID               int64
+	AuthorID         int64
+	Title            string
+	Description      string
+	MediaURL         string
+	CoverURL         string
+	Status           int
+	LikeCount        int
+	CommentCount     int
+	FavoriteCount    int
+	PublishedAt      *time.Time
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+	IdempotencyKey   string
+	ReviewReasonCode string
+	ReviewReason     string
+}
+
+var statusNames = map[int]string{
+	StatusDraft: "draft", StatusProcessing: "processing", StatusPendingReview: "pending_review",
+	StatusPublished: "published", StatusRejected: "rejected", StatusAppealPending: "appeal_pending",
+	StatusOffline: "offline", StatusDeleted: "deleted",
+}
+
+func StatusName(status int) string { return statusNames[status] }
+
+// NewPendingReview creates a validated submission without making it public.
+func NewPendingReview(authorID int64, title, description, mediaURL, coverURL, idempotencyKey string) (*Video, error) {
+	video, err := newVideo(authorID, title, description, mediaURL, coverURL, idempotencyKey)
+	if err != nil {
+		return nil, err
+	}
+	video.Status = StatusPendingReview
+	return video, nil
+}
+
+func NewDraft(authorID int64, title, description, mediaURL, coverURL, idempotencyKey string) (*Video, error) {
+	return newVideo(authorID, title, description, mediaURL, coverURL, idempotencyKey)
 }
 
 // NewPublished 创建一个直接发布的视频，适合当前项目的发布流程。
 func NewPublished(authorID int64, title, description, mediaURL, coverURL, idempotencyKey string) (*Video, error) {
+	video, err := newVideo(authorID, title, description, mediaURL, coverURL, idempotencyKey)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	video.Status = StatusPublished
+	video.PublishedAt = &now
+	return video, nil
+}
+
+func newVideo(authorID int64, title, description, mediaURL, coverURL, idempotencyKey string) (*Video, error) {
 	if authorID <= 0 {
 		return nil, ErrInvalidAuthorID
 	}
@@ -65,18 +104,46 @@ func NewPublished(authorID int64, title, description, mediaURL, coverURL, idempo
 		return nil, ErrIdempotencyKeyTooLong
 	}
 
-	now := time.Now()
-	// 新建视频直接进入 Published 状态，同时记录发布时间用于 Feed 排序。
 	return &Video{
 		AuthorID:       authorID,
 		Title:          title,
 		Description:    description,
 		MediaURL:       mediaURL,
 		CoverURL:       coverURL,
-		Status:         StatusPublished,
-		PublishedAt:    &now,
+		Status:         StatusDraft,
 		IdempotencyKey: idempotencyKey,
 	}, nil
+}
+
+func (v *Video) Publish(at time.Time) bool {
+	if v == nil || (v.Status != StatusPendingReview && v.Status != StatusAppealPending && v.Status != StatusOffline) {
+		return false
+	}
+	if v.PublishedAt == nil {
+		if at.IsZero() {
+			at = time.Now()
+		}
+		at = at.UTC()
+		v.PublishedAt = &at
+	}
+	v.Status = StatusPublished
+	return true
+}
+
+func (v *Video) Reject() bool {
+	if v == nil || (v.Status != StatusPendingReview && v.Status != StatusAppealPending) {
+		return false
+	}
+	v.Status = StatusRejected
+	return true
+}
+
+func (v *Video) Offline() bool {
+	if v == nil || v.Status != StatusPublished {
+		return false
+	}
+	v.Status = StatusOffline
+	return true
 }
 
 // RestoreVideo 从数据库查询结果恢复领域对象，统计字段来自 video_stat 表。

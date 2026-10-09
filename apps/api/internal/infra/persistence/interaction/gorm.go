@@ -1,8 +1,6 @@
 package infrainteraction
 
 import (
-	applicationeventbus "FluxFeed/internal/application/eventbus"
-	applicationinteraction "FluxFeed/internal/application/interaction"
 	domainaccount "FluxFeed/internal/domain/account"
 	domaininteraction "FluxFeed/internal/domain/interaction"
 	domainvideo "FluxFeed/internal/domain/video"
@@ -26,16 +24,18 @@ type Repository struct {
 }
 
 type commentWithUserModel struct {
-	ID             int64
-	VideoID        int64
-	UserID         int64
-	UserNickname   string
-	UserAvatarURL  string
-	Content        string
-	Status         int
-	IdempotencyKey *string
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	ID               int64
+	VideoID          int64
+	UserID           int64
+	UserNickname     string
+	UserAvatarURL    string
+	Content          string
+	Status           int
+	IdempotencyKey   *string
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+	ReviewReasonCode string
+	ReviewReason     string
 }
 
 type userProfileModel struct {
@@ -209,7 +209,7 @@ func actionStatusFromActive(active bool) int {
 	return domaininteraction.ActionStatusCanceled
 }
 
-// CreateComment 创建评论，并在同一事务内增加视频评论数。
+// CreateComment 创建待审核评论；计数和消息只在审核通过后产生。
 func (r *Repository) CreateComment(ctx context.Context, comment *domaininteraction.Comment) (*domaininteraction.Comment, int, int, error) {
 	var model CommentModel
 	var count int
@@ -234,25 +234,7 @@ func (r *Repository) CreateComment(ctx context.Context, comment *domaininteracti
 			return err
 		}
 
-		nextCount, err := updateVideoStatCounter(tx, model.VideoID, "comment_count", 1)
-		if err != nil {
-			return err
-		}
-		count = nextCount
-		if err := infrarecommendation.InvalidateUserInterest(tx, comment.UserID); err != nil {
-			return err
-		}
-		if r.outbox != nil {
-			created := domaininteraction.RestoreComment(model.ID, model.VideoID, model.UserID, "", "", model.Content, model.Status, idempotencyKeyValue(model.IdempotencyKey), model.CreatedAt, model.UpdatedAt)
-			source := applicationinteraction.NewCommentedEvent(created, count)
-			event, err := applicationeventbus.New(source.EventID, applicationeventbus.TypeVideoCommented, source.UserID, source.VideoID, source.OccurredAt, source)
-			if err != nil {
-				return err
-			}
-			if err := r.outbox.Add(tx, r.commentTopic, event); err != nil {
-				return err
-			}
-		}
+		count, _ = currentVideoStatCounter(tx, model.VideoID, "comment_count")
 		return nil
 	})
 	if err != nil {
@@ -269,7 +251,7 @@ func (r *Repository) CreateComment(ctx context.Context, comment *domaininteracti
 	if err != nil {
 		return nil, 0, 0, err
 	}
-	return created, count, 1, nil
+	return created, count, 0, nil
 }
 
 // FindCommentByUserAndIdempotencyKey 根据用户和幂等键查找已创建评论。
@@ -391,17 +373,21 @@ func (r *Repository) DeleteComment(ctx context.Context, commentID int64, userID 
 			return nil
 		}
 
+		wasPublished := model.Status == domaininteraction.CommentStatusNormal
 		model.Status = domaininteraction.CommentStatusDeleted
 		if err := tx.Save(&model).Error; err != nil {
 			return err
 		}
 
-		nextCount, err := updateVideoStatCounter(tx, model.VideoID, "comment_count", -1)
-		if err != nil {
-			return err
+		if wasPublished {
+			nextCount, err := updateVideoStatCounter(tx, model.VideoID, "comment_count", -1)
+			if err != nil {
+				return err
+			}
+			count, statDelta = nextCount, -1
+		} else {
+			count, _ = currentVideoStatCounter(tx, model.VideoID, "comment_count")
 		}
-		count = nextCount
-		statDelta = -1
 		return infrarecommendation.InvalidateUserInterest(tx, model.UserID)
 	})
 	if err != nil {
@@ -524,7 +510,7 @@ func restoreAction(model ActionModel) *domaininteraction.Action {
 
 // restoreComment 把评论联表查询结果转换为领域对象。
 func restoreComment(model commentWithUserModel) *domaininteraction.Comment {
-	return domaininteraction.RestoreComment(
+	comment := domaininteraction.RestoreComment(
 		model.ID,
 		model.VideoID,
 		model.UserID,
@@ -536,11 +522,13 @@ func restoreComment(model commentWithUserModel) *domaininteraction.Comment {
 		model.CreatedAt,
 		model.UpdatedAt,
 	)
+	comment.ReviewReasonCode, comment.ReviewReason = model.ReviewReasonCode, model.ReviewReason
+	return comment
 }
 
 // commentWithUserSelect 统一评论查询字段，并附带用户昵称和头像。
 func commentWithUserSelect() string {
-	return "c.id, c.video_id, c.user_id, a.nickname AS user_nickname, a.avatar_url AS user_avatar_url, c.content, c.status, c.idempotency_key, c.created_at, c.updated_at"
+	return "c.id, c.video_id, c.user_id, a.nickname AS user_nickname, a.avatar_url AS user_avatar_url, c.content, c.status, c.idempotency_key, c.review_reason_code, c.review_reason, c.created_at, c.updated_at"
 }
 
 // idempotencyKeyPtr 将空幂等键存为 NULL，减少唯一索引冲突。

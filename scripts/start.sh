@@ -5,6 +5,25 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 API_DIR="${ROOT_DIR}/apps/api"
 WEB_DIR="${ROOT_DIR}/apps/web"
+ENV_FILE="${ROOT_DIR}/.env"
+
+if [[ ! -f "${ENV_FILE}" ]]; then
+  echo "${ENV_FILE} is required; copy .env.example to .env and replace every generated value"
+  exit 1
+fi
+
+set -a
+# shellcheck disable=SC1090
+source "${ENV_FILE}"
+set +a
+
+export FLUXFEED_ENV=development
+export FLUXFEED_JWT_SECRET="${JWT_SECRET:?JWT_SECRET is required in .env}"
+export FLUXFEED_INTERNAL_TOKEN="${INTERNAL_TOKEN:?INTERNAL_TOKEN is required in .env}"
+export FLUXFEED_DATABASE_USER="${MYSQL_USER:?MYSQL_USER is required in .env}"
+export FLUXFEED_DATABASE_PASSWORD="${MYSQL_PASSWORD:?MYSQL_PASSWORD is required in .env}"
+export FLUXFEED_REDIS_PASSWORD="${REDIS_PASSWORD:?REDIS_PASSWORD is required in .env}"
+export FLUXFEED_RABBITMQ_URL="amqp://${RABBITMQ_USER:?RABBITMQ_USER is required in .env}:${RABBITMQ_PASSWORD:?RABBITMQ_PASSWORD is required in .env}@localhost:5672/"
 
 if ! command -v go >/dev/null 2>&1; then
   echo "go command is required"

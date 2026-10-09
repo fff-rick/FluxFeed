@@ -185,6 +185,24 @@ func WithFeedCache(cache FeedCache) Option {
 	}
 }
 
+func WithVisibilityFilter(filter VisibilityFilter) Option {
+	return func(s *Service) {
+		s.assembler.visibility = filter
+		s.router.Range(func(strategy Strategy) {
+			switch typed := strategy.(type) {
+			case *TimelineStrategy:
+				typed.assembler.visibility = filter
+			case *HotStrategy:
+				typed.assembler.visibility = filter
+			case *FollowingStrategy:
+				typed.assembler.visibility = filter
+			case *RecommendStrategy:
+				typed.assembler.visibility = filter
+			}
+		})
+	}
+}
+
 // WithRecommender 注册推荐 Feed 策略。
 func WithRecommender(recommender Recommender) Option {
 	return func(s *Service) {

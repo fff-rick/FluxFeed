@@ -1,75 +1,47 @@
-# 审核模块设计
+# 审核模块
 
-## 1. 模块职责
+审核模块是视频进入公开 Feed 前的强制治理入口。当前采用“规则预审 + 人工终审”：规则只提供风险提示，不会自动发布或驳回视频。
 
-审核模块负责 Agent 初审、人审判定、审核日志和违规内容下架，是内容发布进入公开 Feed 前的治理入口。
+## 审核流程
 
-## 2. 接口设计
+```text
+用户提交视频
+  → 创建 title / video / cover 三个预审项
+  → Worker 执行规则预审
+  → human_review
+  → 审核员通过或驳回
+  → published / rejected
+```
 
-| 方法 | 接口路径 | 作用 | 鉴权 | 幂等键 |
-| --- | --- | --- | --- | --- |
-| POST | `/internal/review/tasks` | 创建审核任务 | 服务鉴权 | 支持 |
-| PUT | `/internal/review/tasks/{taskId}/agent-result` | 回传 Agent 初审结果 | 服务鉴权 | 支持 |
-| PUT | `/api/review/tasks/{taskId}/decision` | 人工审核通过或驳回 | Bearer JWT(运营角色) | 支持 |
-| PATCH | `/api/videos/{videoId}` | 强制下架视频 | Bearer JWT(运营角色) | 支持 |
+`RuleProvider` 目前只检查审核项字符串中的演示关键词，不分析视频画面、音频或封面内容。接入外部内容安全服务时可通过 `/internal/moderation/results` 回传单项结果，但视频仍必须经过人工终审。
 
-## 3. 数据表设计
+## 接口
 
-### 3.1 `review_task`
-
-| 字段 | 类型 | 约束 | 说明 |
+| 方法 | 路径 | 权限 | 作用 |
 | --- | --- | --- | --- |
-| `id` | BIGINT | PK | 任务 ID |
-| `video_id` | BIGINT | NOT NULL | 视频 ID |
-| `status` | TINYINT | NOT NULL, DEFAULT 1 | 1 待初审 / 2 待人审 / 3 通过 / 4 拒绝 |
-| `agent_score` | DECIMAL(6,3) | NULLABLE | Agent 风险分 |
-| `final_decision` | VARCHAR(16) | NULLABLE | `PASS` / `REJECT` |
-| `reason` | VARCHAR(255) | NULLABLE | 原因 |
-| `updated_by` | BIGINT | NULLABLE | 审核人 |
-| `created_at` | DATETIME | NOT NULL | 创建时间 |
-| `updated_at` | DATETIME | NOT NULL | 更新时间 |
+| GET | `/api/admin/reviews?status=human_review` | `review.read` | 查询人工待审队列及三个预审项 |
+| POST | `/api/admin/reviews/{reviewId}/decisions` | `review.decide` | 人工通过或驳回 |
+| POST | `/internal/moderation/results` | Internal Token | 外部机审回传单项结果 |
+| PUT | `/api/admin/users/{userId}/role` | `role.assign` | 将已注册用户设为 `reviewer` |
 
-索引建议：`idx_status_created(status, created_at)`、`idx_video(video_id)`。
+人工判定请求：
 
-### 3.2 `review_decision_log`
+```json
+{"decision":"pass","reason":"人工审核通过"}
+```
 
-| 字段 | 类型 | 约束 | 说明 |
-| --- | --- | --- | --- |
-| `id` | BIGINT | PK | 日志 ID |
-| `task_id` | BIGINT | NOT NULL | 任务 ID |
-| `operator_type` | VARCHAR(16) | NOT NULL | `AGENT` / `HUMAN` |
-| `decision` | VARCHAR(16) | NOT NULL | `PASS` / `REJECT` |
-| `reason` | VARCHAR(255) | NULLABLE | 原因 |
-| `created_at` | DATETIME | NOT NULL | 创建时间 |
+驳回必须提供明确原因。只有 `human_review` 状态接受人工判定，避免预审尚未结束时提前发布。
 
-索引建议：`idx_task_id(task_id)`。
+## 数据与权限
 
-## 4. 业务规则
+- `content_review` 保存目标、版本、总状态和风险原因。
+- `content_review_item` 保存 `title`、`video`、`cover` 的内容、预审来源、结果和时间。
+- `content_state_history` 保存用户、系统和审核员触发的状态变化。
+- `reviewer` 具有 `review.read` 与 `review.decide`，登录后进入 `/review` 专用工作台。
+- 未审核媒体仅允许作者和具有 `review.read` 权限的用户访问。
 
-| 规则 | 说明 |
-| --- | --- |
-| 视频提交生成审核任务 | 发布或待审流程创建 `review_task` |
-| Agent 结果进入日志 | 初审结果写入 `review_decision_log` |
-| 高风险进入人审 | 风险分超过阈值时任务状态变为待人审 |
-| 人审决定最终生效 | 人审通过或驳回写入最终决定 |
-| 驳回可触发下架 | 审核拒绝时视频状态更新为下架 |
-| 操作保留审计 | 每次 Agent 或人工决定都写日志 |
+项目根目录 `.env` 中的 `ADMIN`、`ADMIN_PW` 用于引导管理员账号。API 启动时会幂等创建该账号；若账号已存在，则同步密码、恢复正常状态并补齐 `super_admin` 权限。该账号登录后自动进入 `/admin`。
 
-## 5. 测试建议
+创建审核员时，先让目标用户正常注册，再由上述管理员在运营后台的“角色分配”页输入用户 ID。角色变更后，目标用户需重新登录以刷新 JWT 和前端资料。
 
-| 场景 | 期望 |
-| --- | --- |
-| 创建审核任务 | 状态为待初审 |
-| Agent 通过 | 任务状态变为通过并写日志 |
-| Agent 高风险 | 任务状态变为待人审 |
-| 人工驳回 | 任务状态变为拒绝，视频下架 |
-| 重复回传结果 | 返回同一审核状态 |
-| 非运营用户人审 | 返回 403 |
-
-## 6. 前端接入点
-
-| 页面 | 接入能力 |
-| --- | --- |
-| 审核工作台 | 待审任务列表、风险分、通过、驳回 |
-| 视频管理 | 强制下架和原因展示 |
-| 消息中心 | 作者接收审核结果通知 |
+评论继续使用现有自动规则审核，不进入视频人工终审队列。

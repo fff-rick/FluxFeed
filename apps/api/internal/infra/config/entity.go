@@ -2,14 +2,22 @@ package infraconfig
 
 // Config 是应用启动配置的根结构，对应 configs/config.yaml。
 type Config struct {
-	Port       int              `yaml:"port"`
-	JWT        JWTConfig        `yaml:"jwt"`
-	Internal   InternalConfig   `yaml:"internal"`
-	Database   DatabaseConfig   `yaml:"database"`
-	Redis      RedisConfig      `yaml:"redis"`
-	Kafka      KafkaConfig      `yaml:"kafka"`
-	RabbitMQ   RabbitMQConfig   `yaml:"rabbitmq"`
-	Governance GovernanceConfig `yaml:"governance"`
+	Environment string           `yaml:"environment"`
+	Port        int              `yaml:"port"`
+	JWT         JWTConfig        `yaml:"jwt"`
+	Internal    InternalConfig   `yaml:"internal"`
+	Admin       AdminConfig      `yaml:"admin"`
+	Database    DatabaseConfig   `yaml:"database"`
+	Redis       RedisConfig      `yaml:"redis"`
+	Kafka       KafkaConfig      `yaml:"kafka"`
+	RabbitMQ    RabbitMQConfig   `yaml:"rabbitmq"`
+	Governance  GovernanceConfig `yaml:"governance"`
+}
+
+// AdminConfig configures the bootstrap administrator created at API startup.
+type AdminConfig struct {
+	Account  string `yaml:"account"`
+	Password string `yaml:"password"`
 }
 
 // GovernanceConfig 保存 API 入口与推荐主链路的治理参数。
@@ -24,6 +32,10 @@ type GovernanceConfig struct {
 // KafkaConfig 保存统一事件总线的 Broker、Topic 和消费组配置。
 type KafkaConfig struct {
 	Brokers              []string `yaml:"brokers"`
+	Username             string   `yaml:"username"`
+	Password             string   `yaml:"password"`
+	TLS                  bool     `yaml:"tls"`
+	TLSServerName        string   `yaml:"tls_server_name"`
 	ClientID             string   `yaml:"client_id"`
 	VideoTopic           string   `yaml:"video_topic"`
 	InteractionTopic     string   `yaml:"interaction_topic"`
@@ -56,13 +68,16 @@ type DatabaseConfig struct {
 	User     string `yaml:"user"`
 	Password string `yaml:"password"`
 	Name     string `yaml:"name"`
+	TLS      string `yaml:"tls"`
 }
 
 // RedisConfig 保存 Redis 连接参数，用于 Feed 读缓存。
 type RedisConfig struct {
-	Addr     string `yaml:"addr"`
-	Password string `yaml:"password"`
-	DB       int    `yaml:"db"`
+	Addr          string `yaml:"addr"`
+	Password      string `yaml:"password"`
+	DB            int    `yaml:"db"`
+	TLS           bool   `yaml:"tls"`
+	TLSServerName string `yaml:"tls_server_name"`
 }
 
 // RabbitMQConfig 保存 RabbitMQ 连接和队列配置。

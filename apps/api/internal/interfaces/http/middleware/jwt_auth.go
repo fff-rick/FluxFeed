@@ -2,6 +2,7 @@ package interfaceshttpmiddleware
 
 import (
 	infrajwt "FluxFeed/internal/infra/jwt"
+	"context"
 	"crypto/subtle"
 	"net/http"
 	"strings"
@@ -14,6 +15,11 @@ const ContextRoleKey = "auth_role"
 
 // NewJWTAuth 返回 Gin 鉴权中间件，负责解析 Bearer token 并写入用户上下文。
 func NewJWTAuth(jwtManager *infrajwt.Manager) gin.HandlerFunc {
+	return NewJWTAuthWithAccount(jwtManager, nil)
+}
+
+// NewJWTAuthWithAccount additionally checks live account state so bans revoke old tokens immediately.
+func NewJWTAuthWithAccount(jwtManager *infrajwt.Manager, active func(context.Context, int64) (bool, error)) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		header := strings.TrimSpace(c.GetHeader("Authorization"))
 		if header == "" {
@@ -46,6 +52,17 @@ func NewJWTAuth(jwtManager *infrajwt.Manager) gin.HandlerFunc {
 			})
 			return
 		}
+		if active != nil {
+			ok, checkErr := active(c.Request.Context(), claims.UserID)
+			if checkErr != nil {
+				c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"message": "account status check failed"})
+				return
+			}
+			if !ok {
+				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"message": "account disabled"})
+				return
+			}
+		}
 
 		// 后续 Handler 从 gin.Context 中读取用户 ID 和角色，避免重复解析 JWT。
 		c.Set(ContextUserIDKey, claims.UserID)
@@ -77,6 +94,9 @@ func NewInternalTokenAuth(token string) gin.HandlerFunc {
 
 // NewOptionalJWTAuth 在公共接口中补充可选登录身份，适合 Feed 个性化场景。
 func NewOptionalJWTAuth(jwtManager *infrajwt.Manager) gin.HandlerFunc {
+	return NewOptionalJWTAuthWithAccount(jwtManager, nil)
+}
+func NewOptionalJWTAuthWithAccount(jwtManager *infrajwt.Manager, active func(context.Context, int64) (bool, error)) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		header := strings.TrimSpace(c.GetHeader("Authorization"))
 		if header == "" {
@@ -93,6 +113,13 @@ func NewOptionalJWTAuth(jwtManager *infrajwt.Manager) gin.HandlerFunc {
 		token := strings.TrimSpace(parts[1])
 		claims, err := jwtManager.ParseAndValidateToken(token, infrajwt.TokenTypeAccess)
 		if err == nil {
+			if active != nil {
+				ok, checkErr := active(c.Request.Context(), claims.UserID)
+				if checkErr != nil || !ok {
+					c.Next()
+					return
+				}
+			}
 			c.Set(ContextUserIDKey, claims.UserID)
 			c.Set(ContextRoleKey, claims.Role)
 		}

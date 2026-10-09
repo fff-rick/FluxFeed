@@ -16,6 +16,8 @@ const FEED_SCENES = [
   { key: "following", label: "关注", route: "/following", icon: "group" },
   { key: "hot", label: "热门", route: "/hotfeed", icon: "local_fire_department" }
 ];
+const REVIEW_ROLES = ["admin", "reviewer", "moderator", "super_admin"];
+const ADMIN_ROLES = ["admin", "moderator", "super_admin"];
 
 const image = {
   currentUser: "/assets/avatar-current.svg",
@@ -49,8 +51,13 @@ function App() {
   }, []);
 
   useEffect(() => {
+	if (token && user?.role === "reviewer" && route !== "/review") {
+	  navigate("/review", setRoute);
+	  return;
+	}
     if (route === "/") {
-      navigate(token ? "/recommend" : "/timeline", setRoute);
+	  navigate(token && user ? roleHomeRoute(user.role) : "/timeline", setRoute);
+	  return;
     }
     if ((route === "/profile" || route === "/me") && !(token && user)) {
       navigate("/timeline", setRoute);
@@ -58,6 +65,16 @@ function App() {
     if (route === "/messages" && !(token && user)) {
       navigate("/auth", setRoute);
     }
+	if (route === "/review" && !(token && user)) {
+	  navigate("/auth", setRoute);
+	  return;
+	}
+	if (route === "/review" && !REVIEW_ROLES.includes(user?.role)) {
+	  navigate(roleHomeRoute(user?.role), setRoute);
+	}
+	if (route === "/admin" && token && user && !ADMIN_ROLES.includes(user.role)) {
+	  navigate(roleHomeRoute(user.role), setRoute);
+	}
   }, [route, token, user]);
 
   const refreshUnreadCount = useCallback(() => {
@@ -170,6 +187,14 @@ function App() {
         <MessagesPage session={session} onNavigate={(path) => navigate(path, setRoute)} onUnreadChange={refreshUnreadCount} />
       </AppShell>
     );
+  }
+
+  if (route === "/review") {
+	return <ReviewerPage session={session} onLogout={() => logout(session, setRoute)} />;
+  }
+
+  if (route === "/admin") {
+    return <AdminPage session={session} onNavigate={(path) => navigate(path, setRoute)} />;
   }
 
   return (
@@ -292,7 +317,7 @@ function LoginPage({ session, onNavigate }) {
       const accessToken = tokenResponse.access_token;
       const profile = await apiRequest("/api/users/me", { token: accessToken });
       session.setAuth(accessToken, profile);
-      onNavigate("/recommend");
+	  onNavigate(roleHomeRoute(profile.role));
     } catch (error) {
       setMessage(error.message || "登录失败，请检查账号与密码");
     } finally {
@@ -399,6 +424,11 @@ function AppShell({ children, user, route, authenticated, unreadCount, onNavigat
             <span>消息</span>
             {authenticated && unreadCount > 0 && <span className="nav-badge">{formatBadgeCount(unreadCount)}</span>}
           </button>
+		  {authenticated && REVIEW_ROLES.includes(displayUser.role) && (
+			<button className={`sidebar-link ${route === "/admin" ? "active" : ""}`} onClick={() => onNavigate("/admin")}>
+			  <span className="material-symbols-outlined filled">admin_panel_settings</span><span>运营后台</span>
+			</button>
+		  )}
         </aside>
         {children}
       </div>
@@ -1698,6 +1728,13 @@ function ProfilePage({ session, onNavigate }) {
   const followingCount = baseUser.following_count ?? baseUser.followingCount ?? 0;
   const followerCount = baseUser.follower_count ?? baseUser.followerCount ?? 0;
 
+  async function appealVideo(video) {
+    const reason = window.prompt("请输入申诉理由");
+    if (!reason?.trim()) return;
+    await apiRequest(`/api/appeals/video/${video.id}`, { method: "POST", token: session.token, headers: { "Idempotency-Key": `video-appeal-${video.id}` }, body: { reason: reason.trim() } });
+    setVideos((current) => current.map((item) => item.id === video.id ? { ...item, status_name: "appeal_pending", can_appeal: false } : item));
+  }
+
   useEffect(() => {
     setForm({
       nickname: baseUser.nickname || "",
@@ -1931,7 +1968,7 @@ function ProfilePage({ session, onNavigate }) {
               最新视频
             </button>
           </header>
-          <VideoGrid videos={videos} state={videosState} onSelect={setSelectedWork} />
+		  <VideoGrid videos={videos} state={videosState} token={session.token} onSelect={setSelectedWork} onAppeal={appealVideo} />
         </section>
       </section>
       {relationModalOpen && (
@@ -1951,7 +1988,7 @@ function ProfilePage({ session, onNavigate }) {
           onToggleFollow={toggleRelationFollow}
         />
       )}
-      {selectedWork && <WorkViewer video={selectedWork} onClose={() => setSelectedWork(null)} />}
+      {selectedWork && <WorkViewer video={selectedWork} token={session.token} onClose={() => setSelectedWork(null)} />}
       {editing && (
         <div className="modal-backdrop" role="presentation">
           <form className="profile-modal profile-form" onSubmit={handleSave}>
@@ -2104,27 +2141,39 @@ function PublicProfilePage({ userID, onNavigate }) {
   );
 }
 
-function VideoGrid({ videos, state, onSelect }) {
+function VideoGrid({ videos, state, token, onSelect, onAppeal }) {
   return (
     <div className="work-list">
       {state === "loading" && <p className="card-empty">正在加载作品</p>}
       {state !== "loading" && typeof state === "string" && state !== "ready" && <p className="card-empty">{state}</p>}
       {state === "ready" && videos.length === 0 && <p className="card-empty">暂无作品</p>}
-      {videos.map((video) => (
-        <button className="work-item" key={video.id || video.video_id} onClick={() => onSelect(video)}>
+	  {videos.map((video) => (
+		<div key={video.id || video.video_id}>
+		<button className="work-item" onClick={() => onSelect(video)}>
           <div className="work-thumb">
-            <img src={video.cover_url || image.stage} alt="" />
+            <WorkThumbnail video={video} token={token} />
             <span className="material-symbols-outlined">play_arrow</span>
           </div>
           <div className="work-meta">
             <h3>{video.title}</h3>
             <p>{formatMetric(video.like_count || 0)} 点赞 · {formatMetric(video.comment_count || 0)} 评论</p>
-            <span className="status-badge">{video.status === 0 ? "审核中" : "已发布"}</span>
+            <span className="status-badge">{contentStatusLabel(video.status_name, video.status)}</span>
+			{video.review_reason && <small>{video.review_reason}</small>}
           </div>
-        </button>
+		</button>
+		{onAppeal && video.can_appeal && <button className="ghost-button compact" type="button" onClick={() => onAppeal(video)}>申诉</button>}
+		</div>
       ))}
     </div>
   );
+}
+
+function WorkThumbnail({ video, token }) {
+  const protectedMedia = isProtectedVideo(video);
+  const asset = useProtectedAsset(protectedMedia ? video.cover_url : "", token);
+  if (!protectedMedia) return <img src={video.cover_url || image.stage} alt="" />;
+  if (asset.state === "ready") return <img src={asset.src} alt="" />;
+  return <span className="material-symbols-outlined">{asset.state === "error" ? "broken_image" : "hourglass_top"}</span>;
 }
 
 function RelationList({
@@ -2250,9 +2299,14 @@ function RelationModal({
   );
 }
 
-function WorkViewer({ video, onClose }) {
+function WorkViewer({ video, token, onClose }) {
   const media = video.media_url || video.cover_url || image.stage;
   const cover = video.cover_url || image.stage;
+  const protectedMedia = isProtectedVideo(video);
+  const mediaAsset = useProtectedAsset(protectedMedia ? media : "", token);
+  const coverAsset = useProtectedAsset(protectedMedia ? cover : "", token);
+  const mediaSource = protectedMedia ? mediaAsset.src : media;
+  const coverSource = protectedMedia ? coverAsset.src : cover;
 
   return (
     <div className="modal-backdrop work-viewer-backdrop" role="presentation" onClick={onClose}>
@@ -2267,11 +2321,18 @@ function WorkViewer({ video, onClose }) {
           </button>
         </header>
         <div className="work-viewer-stage">
-          {isVideoSource(media) ? (
-            <video src={media} poster={cover} controls autoPlay playsInline />
-          ) : (
-            <img src={cover} alt="" />
+          {protectedMedia && mediaAsset.state === "loading" && <p>作品加载中…</p>}
+          {protectedMedia && ["error", "missing"].includes(mediaAsset.state) && (
+            <div className="work-viewer-error">
+              <p>{mediaAsset.error || "作品加载失败"}</p>
+              <button className="ghost-button compact" type="button" onClick={mediaAsset.retry}>重试</button>
+            </div>
           )}
+          {(!protectedMedia || mediaAsset.state === "ready") && (isVideoSource(media) ? (
+            <video src={mediaSource} poster={coverSource} controls autoPlay playsInline />
+          ) : (
+            <img src={coverSource || mediaSource} alt="" />
+          ))}
         </div>
       </section>
     </div>
@@ -2288,6 +2349,7 @@ function UploadPage({ session, onNavigate }) {
   const [coverPreview, setCoverPreview] = useState("");
   const [status, setStatus] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState({ value: 0, label: "" });
 
   useEffect(() => {
     if (!coverFile) {
@@ -2303,6 +2365,7 @@ function UploadPage({ session, onNavigate }) {
     event.preventDefault();
     setSubmitting(true);
     setStatus("");
+    setUploadProgress({ value: 0, label: "准备上传" });
     try {
       if (!videoFile) {
         throw new Error("请选择视频文件");
@@ -2310,10 +2373,18 @@ function UploadPage({ session, onNavigate }) {
       if (!coverFile) {
         throw new Error("请选择封面文件");
       }
+      const loaded = { video: 0, cover: 0 };
+      const totalBytes = videoFile.size + coverFile.size;
+      const trackProgress = (kind) => (bytes) => {
+        loaded[kind] = bytes;
+        const value = totalBytes > 0 ? Math.min(90, Math.round(((loaded.video + loaded.cover) / totalBytes) * 90)) : 90;
+        setUploadProgress({ value, label: "正在上传视频和封面" });
+      };
       const [videoUpload, coverUpload] = await Promise.all([
-        uploadFile(videoFile, "video", session.token),
-        uploadFile(coverFile, "cover", session.token)
+        uploadFile(videoFile, "video", session.token, trackProgress("video")),
+        uploadFile(coverFile, "cover", session.token, trackProgress("cover"))
       ]);
+      setUploadProgress({ value: 95, label: "文件上传完成，正在提交审核" });
       await apiRequest("/api/videos", {
         method: "POST",
         token: session.token,
@@ -2327,10 +2398,12 @@ function UploadPage({ session, onNavigate }) {
           cover_url: coverUpload.url
         }
       });
-      setStatus("发布成功");
+		setStatus("已提交审核");
+      setUploadProgress({ value: 100, label: "已提交审核" });
       onNavigate("/profile");
     } catch (error) {
       setStatus(error.message || "发布失败");
+      setUploadProgress((current) => ({ ...current, label: "上传失败" }));
     } finally {
       setSubmitting(false);
     }
@@ -2408,7 +2481,15 @@ function UploadPage({ session, onNavigate }) {
                 <input type="file" accept="image/*" onChange={(event) => setCoverFile(event.target.files?.[0] || null)} />
               </span>
             </label>
-            {status && <p className={`form-message ${status === "发布成功" ? "success" : ""}`}>{status}</p>}
+			{(submitting || uploadProgress.value > 0) && (
+              <div className="upload-progress" aria-live="polite">
+                <div className="upload-progress-track" role="progressbar" aria-label="上传进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow={uploadProgress.value}>
+                  <span style={{ width: `${uploadProgress.value}%` }} />
+                </div>
+                <p><span>{uploadProgress.label}</span><strong>{uploadProgress.value}%</strong></p>
+              </div>
+            )}
+			{status && <p className={`form-message ${status === "已提交审核" ? "success" : ""}`}>{status}</p>}
             <button className="primary-button" disabled={submitting}>
               <span className="material-symbols-outlined">publish</span>
               {submitting ? "发布中" : "发布"}
@@ -2430,14 +2511,273 @@ function UploadPage({ session, onNavigate }) {
   );
 }
 
+function ReviewerPage({ session, onLogout, embedded = false }) {
+  const [reviews, setReviews] = useState([]);
+  const [selectedID, setSelectedID] = useState(0);
+  const [state, setState] = useState("loading");
+  const [notice, setNotice] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async (quiet = false) => {
+	if (!session.token) return;
+	if (!quiet) setState("loading");
+	try {
+	  const data = await apiRequest("/api/admin/reviews?status=human_review&limit=100", { token: session.token });
+	  const rows = (data.items || []).filter((item) => item.target_type === "video").sort((a, b) => a.id - b.id);
+	  setReviews(rows);
+	  setSelectedID((current) => rows.some((item) => item.id === current) ? current : (rows[0]?.id || 0));
+	  setState("ready");
+	} catch (error) {
+	  if (!quiet) setState(error.message || "审核队列加载失败");
+	}
+  }, [session.token]);
+
+  useEffect(() => {
+	load();
+	const timer = window.setInterval(() => load(true), 10000);
+	return () => window.clearInterval(timer);
+  }, [load]);
+
+  const selected = reviews.find((item) => item.id === selectedID) || null;
+  const reviewItems = selected?.items || [];
+  const titleItem = reviewItems.find((item) => item.component === "title");
+  const videoItem = reviewItems.find((item) => item.component === "video");
+  const coverItem = reviewItems.find((item) => item.component === "cover");
+  const videoAsset = useProtectedAsset(videoItem?.content, session.token);
+  const coverAsset = useProtectedAsset(coverItem?.content, session.token);
+  const mediaReady = videoAsset.state === "ready" && coverAsset.state === "ready";
+
+  async function decide(decision) {
+	if (!selected || busy) return;
+	let reason = "人工审核通过";
+	if (decision === "reject") {
+	  reason = window.prompt("请输入驳回原因")?.trim() || "";
+	  if (!reason) return;
+	}
+	setBusy(true);
+	setNotice("");
+	try {
+	  await apiRequest(`/api/admin/reviews/${selected.id}/decisions`, {
+		method: "POST",
+		token: session.token,
+		body: { decision, reason }
+	  });
+	  setReviews((current) => current.filter((item) => item.id !== selected.id));
+	  setNotice(decision === "pass" ? "审核已通过，视频已发布" : "视频已驳回");
+	  await load(true);
+	} catch (error) {
+	  setNotice(error.message || "任务可能已被其他审核员处理，队列已刷新");
+	  await load(true);
+	} finally {
+	  setBusy(false);
+	}
+  }
+
+  return (
+	<section className={embedded ? "admin-review-workspace" : "review-console"}>
+	  {!embedded && <header className="review-console-header">
+		<div><p className="eyebrow">FluxFeed Governance</p><h1>视频人工审核</h1><span>{reviews.length} 条待审核</span></div>
+		<div className="review-header-actions"><button className="ghost-button compact" onClick={() => load()}>刷新</button><button className="ghost-button compact" onClick={onLogout}>退出登录</button></div>
+	  </header>}
+	  {embedded && <header className="admin-section-header"><div><p className="eyebrow">内容审核</p><h2>视频人工终审</h2><span>{reviews.length} 条待审核</span></div><button className="ghost-button compact" onClick={() => load()}>刷新</button></header>}
+	  {notice && <p className="review-notice">{notice}</p>}
+	  <div className="review-layout">
+		<aside className="review-queue">
+		  <h2>待审队列</h2>
+		  {state === "loading" && <p className="card-empty">正在加载</p>}
+		  {state !== "loading" && state !== "ready" && <p className="card-empty">{state}</p>}
+		  {state === "ready" && reviews.length === 0 && <p className="card-empty">暂无待审视频</p>}
+		  {reviews.map((review) => {
+			const title = review.items?.find((item) => item.component === "title")?.content || `视频 #${review.target_id}`;
+			return <button className={`review-queue-item ${review.id === selectedID ? "active" : ""}`} key={review.id} onClick={() => { setSelectedID(review.id); setNotice(""); }}><strong>{title}</strong><span>视频 #{review.target_id}</span><small>{formatReviewTime(review.created_at)}</small></button>;
+		  })}
+		</aside>
+		<section className="review-detail">
+		  {!selected && <div className="review-empty"><span className="material-symbols-outlined">fact_check</span><p>从左侧选择一个待审视频</p></div>}
+		  {selected && <>
+			<header className="review-detail-header"><div><p className="eyebrow">Review #{selected.id}</p><h2>{titleItem?.content || `视频 #${selected.target_id}`}</h2><span>提交于 {formatReviewTime(selected.created_at)}</span></div><span className="status-badge">人工终审</span></header>
+			<div className="review-media-grid">
+			  <ProtectedReviewMedia kind="video" asset={videoAsset} onRetry={videoAsset.retry} />
+			  <ProtectedReviewMedia kind="cover" asset={coverAsset} onRetry={coverAsset.retry} />
+			</div>
+			<div className="review-checks">
+			  {[titleItem, videoItem, coverItem].filter(Boolean).map((item) => <article className={`review-check verdict-${item.verdict}`} key={item.id}><div><strong>{({ title: "标题", video: "视频", cover: "封面" })[item.component] || item.component}</strong><span>{machineVerdictLabel(item.verdict)}</span></div><p>{item.reason || "规则预审未发现命中项"}</p><small>{item.provider || "unknown"} · {formatReviewTime(item.reviewed_at)}</small></article>)}
+			</div>
+			<footer className="review-actions"><button className="ghost-button reject-button" disabled={busy} onClick={() => decide("reject")}>驳回</button><button className="primary-button" disabled={busy || !mediaReady} title={mediaReady ? "" : "视频和封面加载完成后才能通过"} onClick={() => decide("pass")}>{busy ? "提交中" : "通过并发布"}</button></footer>
+		  </>}
+		</section>
+	  </div>
+	</section>
+  );
+}
+
+function useProtectedAsset(url, token) {
+  const [attempt, setAttempt] = useState(0);
+	const [asset, setAsset] = useState({ url: "", state: url ? "loading" : "missing", src: "", error: "" });
+  useEffect(() => {
+	if (!url || !token) {
+	  setAsset({ url: url || "", state: "missing", src: "", error: "缺少媒体地址" });
+	  return undefined;
+	}
+	const controller = new AbortController();
+	let objectURL = "";
+	setAsset({ url, state: "loading", src: "", error: "" });
+	fetch(url, { headers: { Authorization: `Bearer ${token}` }, signal: controller.signal })
+	  .then((response) => {
+		if (!response.ok) throw new Error(`媒体加载失败 (${response.status})`);
+		return response.blob();
+	  })
+	  .then((blob) => {
+		objectURL = URL.createObjectURL(blob);
+		setAsset({ url, state: "ready", src: objectURL, error: "" });
+	  })
+	  .catch((error) => {
+		if (error.name !== "AbortError") setAsset({ url, state: "error", src: "", error: error.message || "媒体加载失败" });
+	  });
+	return () => {
+	  controller.abort();
+	  if (objectURL) URL.revokeObjectURL(objectURL);
+	};
+  }, [url, token, attempt]);
+	const current = asset.url === (url || "") ? asset : { url: url || "", state: url ? "loading" : "missing", src: "", error: url ? "" : "缺少媒体地址" };
+	return { ...current, retry: () => setAttempt((value) => value + 1) };
+}
+
+function ProtectedReviewMedia({ kind, asset, onRetry }) {
+  return <article className={`review-media review-media-${kind}`}><header><strong>{kind === "video" ? "视频" : "封面"}</strong><span>{asset.state === "ready" ? "已安全加载" : "待加载"}</span></header><div className="review-media-stage">{asset.state === "ready" && kind === "video" && <video src={asset.src} controls playsInline />}{asset.state === "ready" && kind === "cover" && <img src={asset.src} alt="待审核视频封面" />}{asset.state === "loading" && <p>媒体加载中…</p>}{["error", "missing"].includes(asset.state) && <div><p>{asset.error}</p><button className="ghost-button compact" onClick={onRetry}>重试</button></div>}</div></article>;
+}
+
+function machineVerdictLabel(verdict) {
+  return ({ pass: "预审通过", reject: "风险命中", review: "建议复审", pending: "等待预审" })[verdict] || verdict;
+}
+
+function formatReviewTime(value) {
+  if (!value) return "时间未知";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "时间未知" : date.toLocaleString("zh-CN");
+}
+
+function AdminPage({ session, onNavigate }) {
+  const [tab, setTab] = useState("reviews");
+  const [items, setItems] = useState([]);
+  const [state, setState] = useState("loading");
+  const endpoints = { reviews: "/api/admin/reviews", appeals: "/api/admin/appeals", reports: "/api/admin/reports", audit: "/api/admin/audit-logs" };
+	const canAssignRoles = ["admin", "super_admin"].includes(session.user?.role);
+
+  const load = useCallback(() => {
+    if (!session.token) return;
+	if (tab === "roles" || tab === "reviews") {
+	  setItems([]);
+	  setState("ready");
+	  return;
+	}
+    setState("loading");
+    apiRequest(endpoints[tab], { token: session.token })
+      .then((data) => { setItems(data.items || []); setState("ready"); })
+      .catch((error) => { setItems([]); setState(error.message || "加载失败"); });
+  }, [session.token, tab]);
+
+  useEffect(load, [load]);
+
+  async function decide(kind, id, decision) {
+    const reason = window.prompt("请输入操作原因");
+    if (!reason?.trim()) return;
+    const path = kind === "reports"
+      ? `/api/admin/reports/${id}/resolution`
+      : `/api/admin/${kind}/${id}/decisions`;
+    const body = kind === "reports" ? { resolution: reason.trim() } : { decision, reason: reason.trim() };
+    await apiRequest(path, { method: "POST", token: session.token, body });
+    load();
+  }
+
+  if (!session.token) return <main className="upload-page"><p className="card-empty">请先登录管理员账号</p></main>;
+  return (
+    <main className="admin-console">
+      <header className="admin-console-header"><div><p className="eyebrow">运营治理</p><h1>内容审核后台</h1></div><button className="ghost-button compact" onClick={() => onNavigate("/timeline")}>返回前台</button></header>
+      <div className="admin-layout">
+        <aside className="admin-sidebar" aria-label="运营治理栏目">
+          {Object.keys(endpoints).map((key) => <button className={tab === key ? "active" : ""} key={key} onClick={() => setTab(key)}><span className="material-symbols-outlined">{({ reviews: "fact_check", appeals: "gavel", reports: "flag", audit: "history" })[key]}</span>{({ reviews: "审核", appeals: "申诉", reports: "举报", audit: "审计" })[key]}</button>)}
+		  {canAssignRoles && <button className={tab === "roles" ? "active" : ""} onClick={() => setTab("roles")}><span className="material-symbols-outlined">manage_accounts</span>角色分配</button>}
+        </aside>
+        <section className="admin-content">
+          {tab === "reviews" && <ReviewerPage session={session} embedded />}
+		  {tab === "roles" && <ReviewerRoleForm token={session.token} />}
+		  {tab !== "roles" && tab !== "reviews" && <>
+            <header className="admin-section-header"><div><p className="eyebrow">运营治理</p><h2>{({ appeals: "申诉处理", reports: "举报处理", audit: "审计日志" })[tab]}</h2></div><button className="ghost-button compact" onClick={load}>刷新</button></header>
+            {state === "loading" && <p className="card-empty">加载中</p>}
+            {state !== "loading" && state !== "ready" && <p className="card-empty">{state}</p>}
+            {state === "ready" && items.length === 0 && <p className="card-empty">暂无记录</p>}
+            <div className="work-list">
+              {items.map((item) => (
+                <article className="work-item" key={`${tab}-${item.id}`}>
+                  <div className="work-meta">
+                    <h3>#{item.id} {item.target_type || item.action}</h3>
+                    <p>{item.status || item.reason || item.description}</p>
+                    {tab === "appeals" && item.status === "pending" && <><button className="primary-button" onClick={() => decide("appeals", item.id, "pass")}>通过申诉</button><button className="ghost-button compact" onClick={() => decide("appeals", item.id, "reject")}>驳回</button></>}
+                    {tab === "reports" && item.status === "pending" && <button className="primary-button" onClick={() => decide("reports", item.id, "resolve")}>标记已处理</button>}
+                  </div>
+                </article>
+              ))}
+            </div>
+		  </>}
+        </section>
+      </div>
+    </main>
+  );
+}
+
+function ReviewerRoleForm({ token }) {
+  const [form, setForm] = useState({ userID: "", role: "reviewer", reason: "配置视频审核员" });
+  const [state, setState] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function submit(event) {
+	event.preventDefault();
+	const userID = Number(form.userID);
+	if (!Number.isInteger(userID) || userID <= 0 || !form.reason.trim()) {
+	  setState("请输入有效的用户 ID 和操作原因");
+	  return;
+	}
+	setBusy(true);
+	setState("");
+	try {
+	  await apiRequest(`/api/admin/users/${userID}/role`, { method: "PUT", token, body: { role: form.role, reason: form.reason.trim() } });
+	  setState("审核员角色已分配；该用户重新登录后将进入专用审核工作台");
+	  setForm((current) => ({ ...current, userID: "" }));
+	} catch (error) {
+	  setState(error.message || "角色分配失败");
+	} finally {
+	  setBusy(false);
+	}
+  }
+
+  return <form className="role-assignment-form" onSubmit={submit}><div><p className="eyebrow">RBAC</p><h2>分配审核员角色</h2><p>目标用户需先完成普通账号注册。</p></div><label><span>用户 ID</span><input inputMode="numeric" value={form.userID} onChange={(event) => setForm({ ...form, userID: event.target.value })} placeholder="例如 42" /></label><label><span>角色</span><select value={form.role} onChange={(event) => setForm({ ...form, role: event.target.value })}><option value="reviewer">reviewer · 视频审核员</option></select></label><label><span>操作原因</span><input value={form.reason} onChange={(event) => setForm({ ...form, reason: event.target.value })} /></label>{state && <p className="form-message">{state}</p>}<button className="primary-button" disabled={busy}>{busy ? "提交中" : "分配角色"}</button></form>;
+}
+
+function contentStatusLabel(name, status) {
+  const labels = { draft: "草稿", processing: "处理中", pending_review: "审核中", published: "已发布", rejected: "已拒绝", appeal_pending: "申诉中", offline: "已下架", deleted: "已删除" };
+  return labels[name] || (status === 2 ? "已发布" : "审核中");
+}
+
+function isProtectedVideo(video) {
+  if (video.status_name) return video.status_name !== "published";
+  return Number(video.status) !== 2;
+}
+
 function normalizeRoute(pathname) {
   if (pathname === "/login") return "/auth";
   if (pathname === "/me") return "/profile";
   if (/^\/users\/\d+$/.test(pathname)) return pathname;
-  if (["/", "/auth", "/recommend", "/timeline", "/following", "/hotfeed", "/profile", "/upload", "/messages"].includes(pathname)) {
+  if (["/", "/auth", "/recommend", "/timeline", "/following", "/hotfeed", "/profile", "/upload", "/messages", "/admin", "/review"].includes(pathname)) {
     return pathname;
   }
   return "/timeline";
+}
+
+function roleHomeRoute(role) {
+  if (role === "reviewer") return "/review";
+  if (ADMIN_ROLES.includes(role)) return "/admin";
+  return "/recommend";
 }
 
 function feedSceneFromRoute(route) {
@@ -2839,33 +3179,36 @@ async function apiRequest(path, options = {}) {
   return response.json();
 }
 
-async function uploadFile(file, kind, token) {
+async function uploadFile(file, kind, token, onProgress) {
   const data = new FormData();
   data.append("file", file);
   data.append("kind", kind);
-
-  const response = await fetch("/api/uploads", {
-    method: "POST",
-    headers: {
-      Accept: "application/json",
-      Authorization: `Bearer ${token}`
-    },
-    body: data
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open("POST", "/api/uploads");
+    request.setRequestHeader("Accept", "application/json");
+    request.setRequestHeader("Authorization", `Bearer ${token}`);
+    request.upload.onprogress = (event) => {
+      if (event.lengthComputable && onProgress) onProgress(Math.min(event.loaded, file.size));
+    };
+    request.onerror = () => reject(new Error("上传失败，请检查网络连接"));
+    request.onabort = () => reject(new Error("上传已取消"));
+    request.onload = () => {
+      let payload = {};
+      try {
+        payload = request.responseText ? JSON.parse(request.responseText) : {};
+      } catch {
+        payload = {};
+      }
+      if (request.status < 200 || request.status >= 300) {
+        reject(new Error(payload.error || payload.message || request.statusText || "上传失败"));
+        return;
+      }
+      if (onProgress) onProgress(file.size);
+      resolve(payload);
+    };
+    request.send(data);
   });
-
-  if (!response.ok) {
-    let message = "上传失败";
-    try {
-      const payload = await response.json();
-      if (payload.error) message = payload.error;
-      if (payload.message) message = payload.message;
-    } catch {
-      message = response.statusText || message;
-    }
-    throw new Error(message);
-  }
-
-  return response.json();
 }
 
 async function loadFollowingMap(token) {

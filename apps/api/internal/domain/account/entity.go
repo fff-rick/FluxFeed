@@ -10,6 +10,7 @@ const (
 	RoleUser     = "user"
 	RoleAdmin    = "admin"
 	StatusNormal = 1
+	StatusBanned = 2
 )
 
 // User 是账号聚合根，保存登录凭证、展示资料和权限角色。

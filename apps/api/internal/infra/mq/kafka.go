@@ -5,6 +5,7 @@ import (
 	infraconfig "FluxFeed/internal/infra/config"
 	inframetrics "FluxFeed/internal/infra/metrics"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"strconv"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/twmb/franz-go/pkg/kgo"
+	"github.com/twmb/franz-go/pkg/sasl/scram"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -43,10 +45,19 @@ func NewKafka(cfg infraconfig.KafkaConfig, options ...KafkaOption) (*Kafka, erro
 	if len(cfg.Brokers) == 0 {
 		return nil, ErrEmptyKafkaBrokers
 	}
-	producer, err := kgo.NewClient(
+	kafkaOptions := []kgo.Opt{
 		kgo.SeedBrokers(cfg.Brokers...),
 		kgo.ClientID(cfg.ClientID),
-	)
+	}
+	if cfg.Username != "" || cfg.Password != "" {
+		kafkaOptions = append(kafkaOptions, kgo.SASL(scram.Sha256(func(context.Context) (scram.Auth, error) {
+			return scram.Auth{User: cfg.Username, Pass: cfg.Password}, nil
+		})))
+	}
+	if cfg.TLS {
+		kafkaOptions = append(kafkaOptions, kgo.DialTLSConfig(&tls.Config{MinVersion: tls.VersionTLS12, ServerName: cfg.TLSServerName}))
+	}
+	producer, err := kgo.NewClient(kafkaOptions...)
 	if err != nil {
 		return nil, err
 	}
@@ -97,14 +108,23 @@ func (k *Kafka) Publish(ctx context.Context, topic string, event *applicationeve
 }
 
 func (k *Kafka) Subscribe(ctx context.Context, topic string, group string, handler func(context.Context, *applicationeventbus.Event) error) error {
-	consumer, err := kgo.NewClient(
+	consumerOptions := []kgo.Opt{
 		kgo.SeedBrokers(k.config.Brokers...),
-		kgo.ClientID(k.config.ClientID+"-"+group),
+		kgo.ClientID(k.config.ClientID + "-" + group),
 		kgo.ConsumerGroup(group),
 		kgo.ConsumeTopics(topic),
 		kgo.DisableAutoCommit(),
 		kgo.BlockRebalanceOnPoll(),
-	)
+	}
+	if k.config.Username != "" || k.config.Password != "" {
+		consumerOptions = append(consumerOptions, kgo.SASL(scram.Sha256(func(context.Context) (scram.Auth, error) {
+			return scram.Auth{User: k.config.Username, Pass: k.config.Password}, nil
+		})))
+	}
+	if k.config.TLS {
+		consumerOptions = append(consumerOptions, kgo.DialTLSConfig(&tls.Config{MinVersion: tls.VersionTLS12, ServerName: k.config.TLSServerName}))
+	}
+	consumer, err := kgo.NewClient(consumerOptions...)
 	if err != nil {
 		return err
 	}

@@ -20,6 +20,7 @@ const defaultBackfillInboxMaxLen = 1000
 var ErrLoadRelationFailed = errors.New("failed to load relation")
 var ErrUpdateRelationFailed = errors.New("failed to update relation")
 var ErrBackfillFollowFeedFailed = errors.New("failed to backfill follow feed")
+var ErrRelationBlocked = errors.New("relation blocked")
 
 // Service 编排用户关系用例：关注、取关、关注列表和粉丝列表。
 type Service struct {
@@ -27,6 +28,10 @@ type Service struct {
 	backfiller     FollowFeedBackfiller
 	messageWriter  MessageWriter
 	eventPublisher FollowEventPublisher
+	blockChecker   BlockChecker
+}
+type BlockChecker interface {
+	Blocked(context.Context, int64, int64) (bool, error)
 }
 
 type FollowFeedBackfiller interface {
@@ -102,6 +107,9 @@ func WithFollowEventPublisher(publisher FollowEventPublisher) Option {
 		s.eventPublisher = publisher
 	}
 }
+func WithBlockChecker(checker BlockChecker) Option {
+	return func(s *Service) { s.blockChecker = checker }
+}
 
 // Follow 设置当前用户关注目标用户。
 func (s *Service) Follow(ctx context.Context, userID int64, targetUserID int64, idempotencyKey string) (*FollowResult, error) {
@@ -153,6 +161,15 @@ func (s *Service) ListFollowers(ctx context.Context, userID int64, cursor string
 func (s *Service) setFollow(ctx context.Context, userID int64, targetUserID int64, active bool, idempotencyKey string) (*FollowResult, error) {
 	if _, err := domainrelation.NewFollow(userID, targetUserID, idempotencyKey); err != nil {
 		return nil, err
+	}
+	if active && s.blockChecker != nil {
+		blocked, err := s.blockChecker.Blocked(ctx, userID, targetUserID)
+		if err != nil {
+			return nil, ErrLoadRelationFailed
+		}
+		if blocked {
+			return nil, ErrRelationBlocked
+		}
 	}
 
 	follow, userStat, targetStat, err := s.repo.SetFollow(ctx, userID, targetUserID, active, idempotencyKey)

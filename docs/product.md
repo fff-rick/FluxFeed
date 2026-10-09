@@ -22,7 +22,7 @@ FluxFeed 是一个短视频 Feed 系统，目标是用最小可行架构承载�
 | 内容 | 互动 | 点赞、收藏、评论、计数 |
 | 分发 | Feed | Timeline、Hot、游标分页、卡片组装 |
 | 分发 | 推荐 | 召回、排序、打散、曝光去重 |
-| 治理 | 审核 | Agent 初审、人审判定、违规下架 |
+| 治理 | 审核 | 三项规则预审、人工终审、违规下架 |
 | 治理 | 后台运营 | 内容查询、审核分配、配置管理 |
 | 体验 | 消息 | 通知、未读数、已读状态 |
 | 体验 | 播放优化 | 播放参数、预加载、QoS 上报 |
@@ -40,8 +40,8 @@ FluxFeed 是一个短视频 Feed 系统，目标是用最小可行架构承载�
 | 互动 | 已实现 | 点赞、收藏、评论、删除评论、异步落库 |
 | 关系 | 已实现 | 关注、取关、关注列表、粉丝列表 |
 | 消息 | 已实现 | 站内通知、未读状态、批量已读、内部事件生成消息 |
-| 审核 | 规划中 | Agent 初审和人工复审 |
-| 后台运营 | 规划中 | 视频查询、审核任务、配置管理 |
+| 审核 | 已实现 | title / video / cover 规则预审、审核员终审、驳回与申诉 |
+| 后台运营 | 部分实现 | 审核、申诉、举报、角色分配和审计；配置管理待补齐 |
 | 播放优化 | 已实现 | 播放参数、预加载建议、QoS 上报、Web Feed 接入 |
 | 系统治理 | 规划中 | 限流、降级、死信重试 |
 | 监控告警 | 规划中 | 指标写入、看板、告警 |
@@ -67,9 +67,9 @@ P0 目标是完整跑通用户端主链路和基础稳定性链路。
 | 已实现 | 互动 | DELETE | `/api/videos/{videoId}/like` | 取消点赞 |
 | 已实现 | 互动 | POST | `/api/videos/{videoId}/comments` | 发表评论 |
 | 已实现 | 互动 | GET | `/api/videos/{videoId}/comments` | 评论列表 |
-| 规划中 | 审核 | POST | `/internal/review/tasks` | 创建审核任务 |
-| 规划中 | 审核 | PUT | `/api/review/tasks/{taskId}/decision` | 人工审核通过或驳回 |
-| 规划中 | 审核 | PATCH | `/api/videos/{videoId}` | 违规内容下架 |
+| 已实现 | 审核 | GET | `/api/admin/reviews` | 查询人工审核队列与预审项 |
+| 已实现 | 审核 | POST | `/api/admin/reviews/{reviewId}/decisions` | 人工审核通过或驳回 |
+| 已实现 | 审核 | POST | `/api/admin/content/{targetType}/{targetId}/offline` | 违规内容下架 |
 | 规划中 | 系统治理 | POST | `/internal/rate-limit-decisions` | 限流放行检查 |
 | 规划中 | 监控告警 | POST | `/internal/metric-points` | 核心指标写入 |
 
@@ -95,7 +95,7 @@ P0 目标是完整跑通用户端主链路和基础稳定性链路。
 | 已实现 | 消息 | GET | `/api/message-stats/unread` | 未读计数 |
 | 已实现 | 消息 | PATCH | `/api/messages` | 批量已读 |
 | 已实现 | 消息 | POST | `/internal/messages` | 消费事件生成消息 |
-| 规划中 | 审核 | PUT | `/internal/review/tasks/{taskId}/agent-result` | Agent 初审回传 |
+| 已实现 | 审核 | POST | `/internal/moderation/results` | 外部机审结果回传 |
 | 规划中 | 后台运营 | GET | `/api/admin/videos` | 运营查视频 |
 | 规划中 | 后台运营 | GET | `/api/admin/review/tasks` | 运营查审核任务 |
 | 规划中 | 后台运营 | PUT | `/api/admin/review/tasks/{taskId}/assignee` | 分配审核员 |
@@ -124,7 +124,7 @@ P0 目标是完整跑通用户端主链路和基础稳定性链路。
 | 已实现 | 发布页 | 发布视频信息 |
 | 已实现 | 消息页 | 展示通知、未读状态和已读操作 |
 | 已实现 | 播放优化接入 | Feed 页读取播放配置、预加载后续视频、上报首帧和卡顿 |
-| 规划中 | 审核后台 | 内容审核和违规处理 |
+| 已实现 | 审核工作台 | 待审队列、媒体预览、三项预审结果、通过与驳回 |
 | 规划中 | 监控看板 | 指标、告警和治理状态 |
 
 ## 7. 里程碑

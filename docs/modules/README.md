@@ -12,7 +12,7 @@
 | 内容 | 互动 | [interaction.md](interaction.md) | 已实现 |
 | 分发 | Feed | [feed.md](feed.md) | 已实现 |
 | 分发 | 推荐 | [recommendation.md](recommendation.md) | 已实现 |
-| 治理 | 审核 | [review.md](review.md) | 规划中 |
+| 治理 | 审核 | [review.md](review.md) | 已实现 |
 | 治理 | 后台运营 | [admin.md](admin.md) | 规划中 |
 | 体验 | 消息 | [message.md](message.md) | 已实现 |
 | 体验 | 播放优化 | [playback.md](playback.md) | 已实现 |

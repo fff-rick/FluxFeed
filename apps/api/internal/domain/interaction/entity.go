@@ -12,8 +12,12 @@ const (
 	ActionStatusActive   = 1
 	ActionStatusCanceled = 2
 
-	CommentStatusNormal  = 1
-	CommentStatusDeleted = 2
+	CommentStatusNormal        = 1
+	CommentStatusDeleted       = 2
+	CommentStatusPendingReview = 3
+	CommentStatusRejected      = 4
+	CommentStatusOffline       = 5
+	CommentStatusAppealPending = 6
 
 	MaxCommentContentLength = 1000
 	MaxIdempotencyKeyLength = 128
@@ -34,16 +38,18 @@ type Action struct {
 
 // Comment 表示视频评论，包含评论者展示信息和软删除状态。
 type Comment struct {
-	ID             int64
-	VideoID        int64
-	UserID         int64
-	UserNickname   string
-	UserAvatarURL  string
-	Content        string
-	Status         int
-	IdempotencyKey string
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	ID               int64
+	VideoID          int64
+	UserID           int64
+	UserNickname     string
+	UserAvatarURL    string
+	Content          string
+	Status           int
+	IdempotencyKey   string
+	ReviewReasonCode string
+	ReviewReason     string
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
 }
 
 // CommentCursor 保存评论列表分页的排序字段。
@@ -102,7 +108,7 @@ func NewComment(videoID int64, userID int64, content string, idempotencyKey stri
 		VideoID:        videoID,
 		UserID:         userID,
 		Content:        content,
-		Status:         CommentStatusNormal,
+		Status:         CommentStatusPendingReview,
 		IdempotencyKey: idempotencyKey,
 	}, nil
 }

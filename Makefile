@@ -21,7 +21,8 @@ API_DIR  := $(ROOT_DIR)/apps/api
 WEB_DIR  := $(ROOT_DIR)/apps/web
 BIN_DIR  := $(ROOT_DIR)/build
 
-COMPOSE := docker compose -f $(ROOT_DIR)/apps/docker-compose.yml
+COMPOSE := docker compose --env-file $(ROOT_DIR)/.env -f $(ROOT_DIR)/apps/docker-compose.yml
+COMPOSE_PERFORMANCE := $(COMPOSE) -f $(ROOT_DIR)/apps/docker-compose.performance.yml
 
 GO_BUILD_ENV   := CGO_ENABLED=0
 GO_BUILD_FLAGS := -trimpath -ldflags='-s -w'
@@ -145,8 +146,7 @@ down: ## 停止并移除容器
 	$(COMPOSE) down
 
 .PHONY: down-v
-down-v: ## 停止容器并删除数据卷
-	$(COMPOSE) down -v
+down-v: clean ## 停止容器并删除全部数据卷
 
 .PHONY: ps
 ps: ## 查看容器状态
@@ -166,7 +166,12 @@ restart: down up ## 重启全栈
 # ---------------------------------------------------------------------- 其他
 
 .PHONY: clean
-clean: ## 清理构建产物与测试缓存
+clean: ## 停止容器并删除普通、性能环境的全部数据卷
+	$(COMPOSE) down --volumes --remove-orphans
+	$(COMPOSE_PERFORMANCE) down --volumes --remove-orphans
+
+.PHONY: clean-build
+clean-build: ## 清理构建产物与测试缓存
 	rm -rf $(BIN_DIR)
 	cd $(API_DIR) && $(GO) clean -testcache
 
