@@ -18,14 +18,19 @@ type actionResponse struct {
 
 // commentResponse 是评论详情响应，创建评论时会额外返回 CommentCount。
 type commentResponse struct {
-	ID            int64     `json:"id"`
-	VideoID       int64     `json:"video_id"`
-	UserID        int64     `json:"user_id"`
-	UserNickname  string    `json:"user_nickname"`
-	UserAvatarURL string    `json:"user_avatar_url"`
-	Content       string    `json:"content"`
-	CreatedAt     time.Time `json:"created_at"`
-	CommentCount  int       `json:"comment_count,omitempty"`
+	ID               int64     `json:"id"`
+	VideoID          int64     `json:"video_id"`
+	UserID           int64     `json:"user_id"`
+	UserNickname     string    `json:"user_nickname"`
+	UserAvatarURL    string    `json:"user_avatar_url"`
+	Content          string    `json:"content"`
+	CreatedAt        time.Time `json:"created_at"`
+	CommentCount     int       `json:"comment_count,omitempty"`
+	Status           int       `json:"status"`
+	StatusName       string    `json:"status_name"`
+	CanAppeal        bool      `json:"can_appeal"`
+	ReviewReasonCode string    `json:"review_reason_code,omitempty"`
+	ReviewReason     string    `json:"review_reason,omitempty"`
 }
 
 // commentListResponse 是评论游标分页响应。

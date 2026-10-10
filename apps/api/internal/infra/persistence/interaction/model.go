@@ -23,14 +23,16 @@ func (ActionModel) TableName() string {
 
 // CommentModel 映射 interaction_comment 表，评论采用软删除状态。
 type CommentModel struct {
-	ID             int64     `gorm:"column:id;primaryKey;autoIncrement"`
-	VideoID        int64     `gorm:"column:video_id;not null;index:idx_video_status_created,priority:1"`
-	UserID         int64     `gorm:"column:user_id;not null;index:idx_user_created,priority:1;uniqueIndex:uk_user_idempotency,priority:1"`
-	Content        string    `gorm:"column:content;size:1000;not null"`
-	Status         int       `gorm:"column:status;type:tinyint;not null;default:1;index:idx_video_status_created,priority:2"`
-	IdempotencyKey *string   `gorm:"column:idempotency_key;size:128;uniqueIndex:uk_user_idempotency,priority:2"`
-	CreatedAt      time.Time `gorm:"column:created_at;autoCreateTime;index:idx_video_status_created,priority:3;index:idx_user_created,priority:2"`
-	UpdatedAt      time.Time `gorm:"column:updated_at;autoUpdateTime;index:idx_video_status_created,priority:4"`
+	ID               int64     `gorm:"column:id;primaryKey;autoIncrement"`
+	VideoID          int64     `gorm:"column:video_id;not null;index:idx_video_status_created,priority:1"`
+	UserID           int64     `gorm:"column:user_id;not null;index:idx_user_created,priority:1;uniqueIndex:uk_user_idempotency,priority:1"`
+	Content          string    `gorm:"column:content;size:1000;not null"`
+	Status           int       `gorm:"column:status;type:tinyint;not null;default:1;index:idx_video_status_created,priority:2"`
+	ReviewReasonCode string    `gorm:"column:review_reason_code;size:64"`
+	ReviewReason     string    `gorm:"column:review_reason;size:512"`
+	IdempotencyKey   *string   `gorm:"column:idempotency_key;size:128;uniqueIndex:uk_user_idempotency,priority:2"`
+	CreatedAt        time.Time `gorm:"column:created_at;autoCreateTime;index:idx_video_status_created,priority:3;index:idx_user_created,priority:2"`
+	UpdatedAt        time.Time `gorm:"column:updated_at;autoUpdateTime;index:idx_video_status_created,priority:4"`
 }
 
 // TableName 指定评论表名。

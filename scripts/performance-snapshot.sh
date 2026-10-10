@@ -14,10 +14,11 @@ repo_dir=$(cd "$script_dir/.." && pwd)
 snapshot_root=${PERFORMANCE_SNAPSHOT_DIR:-$repo_dir/build/performance/snapshots}
 snapshot_dir=$snapshot_root/$snapshot_name
 database_name=${MYSQL_DATABASE:-FluxFeed}
-mysql_password=${MYSQL_ROOT_PASSWORD:-sealos123}
+mysql_password=${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}
+mysql_user=${MYSQL_USER:?MYSQL_USER is required}
 api_port=${PERFORMANCE_API_PORT:-8080}
 health_url=${PERFORMANCE_BASE_URL:-http://127.0.0.1:$api_port}
-compose=(docker compose -f "$repo_dir/apps/docker-compose.yml" -f "$repo_dir/apps/docker-compose.performance.yml")
+compose=(docker compose --env-file "$repo_dir/.env" -f "$repo_dir/apps/docker-compose.yml" -f "$repo_dir/apps/docker-compose.performance.yml")
 
 usage() {
   echo "usage: $0 {create|restore|verify} [snapshot-name]" >&2
@@ -50,7 +51,7 @@ assert_performance_stack() {
 
 database_counts() {
   "${compose[@]}" exec -T -e MYSQL_PWD="$mysql_password" mysql \
-    mysql -uroot -N -B "$database_name" -e "
+    mysql -u"$mysql_user" -N -B "$database_name" -e "
       SELECT 'account', COUNT(*) FROM account
       UNION ALL SELECT 'video', COUNT(*) FROM video
       UNION ALL SELECT 'video_embedding', COUNT(*) FROM video_embedding
@@ -86,7 +87,7 @@ create_snapshot() {
 
   local unsettled
   unsettled=$("${compose[@]}" exec -T -e MYSQL_PWD="$mysql_password" mysql \
-    mysql -uroot -N -B "$database_name" -e "SELECT COUNT(*) FROM outbox_event WHERE status <> 'published';")
+    mysql -u"$mysql_user" -N -B "$database_name" -e "SELECT COUNT(*) FROM outbox_event WHERE status <> 'published';")
   if [[ "$unsettled" != "0" ]]; then
     echo "refusing to snapshot with $unsettled unsettled outbox events" >&2
     exit 1
@@ -94,7 +95,7 @@ create_snapshot() {
   mkdir -p "$snapshot_dir"
   local partial_dump=$snapshot_dir/database.sql.gz.partial
   "${compose[@]}" exec -T -e MYSQL_PWD="$mysql_password" mysql \
-    mysqldump -uroot --single-transaction --routines --triggers --events \
+    mysqldump -u"$mysql_user" --single-transaction --routines --triggers --events \
     --set-gtid-purged=OFF --no-tablespaces --databases "$database_name" | gzip -1 >"$partial_dump"
   mv "$partial_dump" "$snapshot_dir/database.sql.gz"
   (cd "$snapshot_dir" && sha256sum database.sql.gz >database.sql.gz.sha256)
@@ -121,7 +122,7 @@ restore_snapshot() {
 
   "${compose[@]}" stop api worker >/dev/null
   gzip -dc "$snapshot_dir/database.sql.gz" | \
-    "${compose[@]}" exec -T -e MYSQL_PWD="$mysql_password" mysql mysql -uroot
+    "${compose[@]}" exec -T -e MYSQL_PWD="$mysql_password" mysql mysql -u"$mysql_user"
   "${compose[@]}" exec -T redis redis-cli FLUSHDB >/dev/null
   "${compose[@]}" up -d api worker >/dev/null
   stopped=0

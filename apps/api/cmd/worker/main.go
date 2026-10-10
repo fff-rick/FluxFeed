@@ -23,6 +23,7 @@ import (
 	infraembedding "FluxFeed/internal/infra/persistence/embedding"
 	infraeventbus "FluxFeed/internal/infra/persistence/eventbus"
 	infrafeed "FluxFeed/internal/infra/persistence/feed"
+	infragovernance "FluxFeed/internal/infra/persistence/governance"
 	infrainteraction "FluxFeed/internal/infra/persistence/interaction"
 	migration "FluxFeed/internal/infra/persistence/migration"
 	infraoutbox "FluxFeed/internal/infra/persistence/outbox"
@@ -121,13 +122,48 @@ func newWorkerEventBus(cfg *infraconfig.Config, db *gorm.DB) (workerEventBus, er
 }
 
 func startWorkers(ctx context.Context, cfg *infraconfig.Config, gormDB *gorm.DB, eventBus workerEventBus) error {
+	outboxRepo := infraoutbox.New(gormDB)
 	if bus, ok := eventBus.(applicationeventbus.Bus); ok {
-		outboxRepo := infraoutbox.New(gormDB)
 		go applicationeventbus.NewOutboxWorker(outboxRepo, bus).Run(ctx)
 		go monitorOutbox(ctx, outboxRepo)
 	}
+	videoTopic := cfg.Kafka.VideoTopic
+	if videoTopic == "" {
+		videoTopic = "fluxfeed.video"
+	}
+	interactionTopic := cfg.Kafka.InteractionTopic
+	if interactionTopic == "" {
+		interactionTopic = "fluxfeed.interaction"
+	}
+	moderationService := infragovernance.New(gormDB, outboxRepo, videoTopic, interactionTopic)
+	if _, ok := eventBus.(applicationeventbus.Bus); !ok {
+		videoPublisher, _ := eventBus.(applicationvideo.PublishedEventPublisher)
+		var comments applicationinteraction.CommentEventPublisher
+		if value, yes := eventBus.(applicationinteraction.CommentEventPublisher); yes {
+			comments = value
+		}
+		moderationService.SetPublishers(videoPublisher, comments)
+	}
+	go runModerationWorker(ctx, moderationService)
 	redisClient := infracache.NewRedisClient(cfg.Redis)
 	feedCache := infracache.NewFeedCache(redisClient)
+	if bus, ok := eventBus.(applicationeventbus.Bus); ok {
+		if err := bus.Subscribe(ctx, videoTopic, "fluxfeed-content-visibility", func(ctx context.Context, event *applicationeventbus.Event) error {
+			if event.Type != applicationeventbus.TypeContentVisibilityChanged {
+				return nil
+			}
+			var payload struct {
+				VideoID int64  `json:"video_id"`
+				Status  string `json:"status"`
+			}
+			if err := event.Decode(&payload); err != nil {
+				return err
+			}
+			return feedCache.InvalidateVideo(ctx, payload.VideoID, payload.Status != "published")
+		}); err != nil {
+			return err
+		}
+	}
 
 	interactionRepo := infrainteraction.New(gormDB)
 	actionWorker := applicationinteraction.NewActionWorker(interactionRepo, eventBus)
@@ -159,6 +195,21 @@ func startWorkers(ctx context.Context, cfg *infraconfig.Config, gormDB *gorm.DB,
 		return applicationrecommendation.NewEventWorker(feedCache, consumer).Start(ctx)
 	}
 	return nil
+}
+
+func runModerationWorker(ctx context.Context, service *infragovernance.Service) {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if err := service.ProcessPending(ctx, 50); err != nil && ctx.Err() == nil {
+			log.Printf("process moderation queue failed: %v", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 func monitorOutbox(ctx context.Context, repo *infraoutbox.Repository) {

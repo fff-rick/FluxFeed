@@ -156,6 +156,26 @@ func (r *memoryVideoRepo) ListByAuthor(ctx context.Context, authorID int64, limi
 	return videos[offset:end], nil
 }
 
+func (r *memoryVideoRepo) ListByAuthorAnyStatus(ctx context.Context, authorID int64, limit, offset int) ([]*domainvideo.Video, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	videos := make([]*domainvideo.Video, 0)
+	for _, video := range r.byID {
+		if video.AuthorID == authorID {
+			videos = append(videos, cloneVideo(video))
+		}
+	}
+	sort.Slice(videos, func(i, j int) bool { return videos[i].ID > videos[j].ID })
+	if offset >= len(videos) {
+		return []*domainvideo.Video{}, nil
+	}
+	end := offset + limit
+	if end > len(videos) {
+		end = len(videos)
+	}
+	return videos[offset:end], nil
+}
+
 // UpdateStatus 模拟视频状态更新，当前用于软删除。
 func (r *memoryVideoRepo) UpdateStatus(ctx context.Context, video *domainvideo.Video) error {
 	r.mu.Lock()
@@ -196,14 +216,14 @@ func TestVideoAPIFlow(t *testing.T) {
 		token,
 		"create-video-1",
 	)
-	requireStatus(t, createResponse, http.StatusCreated)
+	requireStatus(t, createResponse, http.StatusAccepted)
 
 	var created videoAPIResponse
 	decodeJSON(t, createResponse, &created)
-	if created.ID == 0 || created.AuthorID != 42 || created.Status != domainvideo.StatusPublished {
+	if created.ID == 0 || created.AuthorID != 42 || created.Status != domainvideo.StatusPendingReview {
 		t.Fatalf("unexpected create response: %+v", created)
 	}
-	if created.Title != "first video" || created.Description != "hello timeline" || created.MediaURL == "" || created.CoverURL == "" || created.PublishedAt == nil {
+	if created.Title != "first video" || created.Description != "hello timeline" || created.MediaURL == "" || created.CoverURL == "" || created.PublishedAt != nil {
 		t.Fatalf("unexpected create response: %+v", created)
 	}
 
@@ -224,14 +244,14 @@ func TestVideoAPIFlow(t *testing.T) {
 	}
 
 	getResponse := performJSONRequest(router, http.MethodGet, fmt.Sprintf("/api/videos/%d", created.ID), "", "")
-	requireStatus(t, getResponse, http.StatusOK)
+	requireStatus(t, getResponse, http.StatusNotFound)
 
 	listResponse := performJSONRequest(router, http.MethodGet, "/api/users/42/videos?limit=10&offset=0", "", "")
 	requireStatus(t, listResponse, http.StatusOK)
 
 	var list videoListAPIResponse
 	decodeJSON(t, listResponse, &list)
-	if len(list.Items) != 1 || list.Items[0].ID != created.ID || list.Limit != 10 || list.Offset != 0 {
+	if len(list.Items) != 0 || list.Limit != 10 || list.Offset != 0 {
 		t.Fatalf("unexpected author list response: %+v", list)
 	}
 
@@ -276,8 +296,8 @@ func TestVideoPublishedEvent(t *testing.T) {
 		token,
 		"create-video-event",
 	)
-	requireStatus(t, createResponse, http.StatusCreated)
-	if publisher.EventCount() != 1 {
+	requireStatus(t, createResponse, http.StatusAccepted)
+	if publisher.EventCount() != 0 {
 		t.Fatalf("unexpected published event count after create: %d", publisher.EventCount())
 	}
 
@@ -290,7 +310,7 @@ func TestVideoPublishedEvent(t *testing.T) {
 		"create-video-event",
 	)
 	requireStatus(t, replayResponse, http.StatusOK)
-	if publisher.EventCount() != 1 {
+	if publisher.EventCount() != 0 {
 		t.Fatalf("unexpected published event count after replay: %d", publisher.EventCount())
 	}
 }
@@ -331,7 +351,7 @@ func TestVideoAPIValidation(t *testing.T) {
 		`{"title":"owned video","description":"owned description","media_url":"https://example.com/video.mp4","cover_url":"https://example.com/cover.jpg"}`,
 		token,
 	)
-	requireStatus(t, createResponse, http.StatusCreated)
+	requireStatus(t, createResponse, http.StatusAccepted)
 
 	var created videoAPIResponse
 	decodeJSON(t, createResponse, &created)

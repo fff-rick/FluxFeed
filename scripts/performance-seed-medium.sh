@@ -7,10 +7,11 @@ source_account=${PERFORMANCE_SOURCE_ACCOUNT:-medium-user-00001}
 password=${PERFORMANCE_PASSWORD:-}
 api_port=${PERFORMANCE_API_PORT:-8080}
 base_url=${PERFORMANCE_BASE_URL:-http://127.0.0.1:$api_port}
-mysql_password=${MYSQL_ROOT_PASSWORD:-sealos123}
+mysql_password=${MYSQL_PASSWORD:?MYSQL_PASSWORD is required}
+mysql_user=${MYSQL_USER:?MYSQL_USER is required}
 artifact_dir=${PERFORMANCE_ARTIFACT_DIR:-$repo_dir/build/performance/medium-v1}
 snapshot_root=${PERFORMANCE_SNAPSHOT_DIR:-$repo_dir/build/performance/snapshots}
-compose=(docker compose -f "$repo_dir/apps/docker-compose.yml" -f "$repo_dir/apps/docker-compose.performance.yml")
+compose=(docker compose --env-file "$repo_dir/.env" -f "$repo_dir/apps/docker-compose.yml" -f "$repo_dir/apps/docker-compose.performance.yml")
 
 if [[ -z "$password" ]]; then
   echo "PERFORMANCE_PASSWORD is required and is only written to ignored local account-pool files" >&2
@@ -55,7 +56,7 @@ trap restart_services EXIT
 "${compose[@]}" stop api worker >/dev/null
 
 { printf "SET @source_account = '%s';\n" "$source_account"; sed -n '1,$p' "$script_dir/performance-seed-medium.sql"; } | \
-  "${compose[@]}" exec -T -e MYSQL_PWD="$mysql_password" mysql mysql -uroot -N -B FluxFeed
+  "${compose[@]}" exec -T -e MYSQL_PWD="$mysql_password" mysql mysql -u"$mysql_user" -N -B FluxFeed
 
 "${compose[@]}" exec -T redis redis-cli FLUSHDB >/dev/null
 "${compose[@]}" up -d api worker >/dev/null
@@ -81,16 +82,16 @@ jq -n --arg password "$password" '
 ' >"$artifact_dir/write-accounts.json"
 chmod 600 "$artifact_dir/read-accounts.json" "$artifact_dir/write-accounts.json"
 
-"${compose[@]}" exec -T -e MYSQL_PWD="$mysql_password" mysql mysql -uroot -N -B FluxFeed -e "
+"${compose[@]}" exec -T -e MYSQL_PWD="$mysql_password" mysql mysql -u"$mysql_user" -N -B FluxFeed -e "
   SELECT GROUP_CONCAT(id ORDER BY id SEPARATOR ',')
   FROM (SELECT id FROM video WHERE idempotency_key LIKE 'medium-v1-video-%' ORDER BY id LIMIT 1000) targets;
 " >"$artifact_dir/video-ids.txt"
-"${compose[@]}" exec -T -e MYSQL_PWD="$mysql_password" mysql mysql -uroot -N -B FluxFeed -e "
+"${compose[@]}" exec -T -e MYSQL_PWD="$mysql_password" mysql mysql -u"$mysql_user" -N -B FluxFeed -e "
   SELECT GROUP_CONCAT(id ORDER BY id SEPARATOR ',')
   FROM (SELECT id FROM account WHERE account LIKE 'medium-user-%' ORDER BY account LIMIT 200 OFFSET 200) targets;
 " >"$artifact_dir/target-user-ids.txt"
 
-ready=$("${compose[@]}" exec -T -e MYSQL_PWD="$mysql_password" mysql mysql -uroot -N -B FluxFeed -e "
+ready=$("${compose[@]}" exec -T -e MYSQL_PWD="$mysql_password" mysql mysql -u"$mysql_user" -N -B FluxFeed -e "
   SELECT
     (SELECT COUNT(*) FROM account) >= 12000
     AND (SELECT COUNT(*) FROM video WHERE status = 2) >= 100000

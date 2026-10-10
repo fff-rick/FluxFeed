@@ -207,10 +207,15 @@ func assemblePipelineResult(ctx context.Context, req FeedRequest, scene domainfe
 }
 
 type FeedAssembler struct {
-	repo      domainfeed.Repository
-	cache     FeedCache
-	cardGroup singleflight.Group
-	statGroup singleflight.Group
+	repo       domainfeed.Repository
+	cache      FeedCache
+	cardGroup  singleflight.Group
+	statGroup  singleflight.Group
+	visibility VisibilityFilter
+}
+
+type VisibilityFilter interface {
+	FilterVisible(context.Context, int64, []*domainfeed.FeedPageItem) ([]*domainfeed.FeedPageItem, error)
 }
 
 func NewFeedAssembler(repo domainfeed.Repository, cache FeedCache) *FeedAssembler {
@@ -218,5 +223,12 @@ func NewFeedAssembler(repo domainfeed.Repository, cache FeedCache) *FeedAssemble
 }
 
 func (a *FeedAssembler) Assemble(ctx context.Context, req FeedRequest, items []*domainfeed.FeedPageItem) ([]*domainfeed.FeedItem, error) {
+	if a.visibility != nil {
+		var err error
+		items, err = a.visibility.FilterVisible(ctx, req.ViewerID, items)
+		if err != nil {
+			return nil, err
+		}
+	}
 	return assembleFeedItems(ctx, a.repo, a.cache, items, req.ViewerID, &a.cardGroup, &a.statGroup)
 }

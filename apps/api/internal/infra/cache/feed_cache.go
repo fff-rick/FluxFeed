@@ -352,6 +352,82 @@ func (c *FeedCache) SetVideoStat(ctx context.Context, stat *domaininteraction.Vi
 	return err
 }
 
+func (c *FeedCache) InvalidateVideo(ctx context.Context, videoID int64, hidden bool) error {
+	if videoID <= 0 {
+		return nil
+	}
+	cardKey, statKey := feedCardKey(videoID), feedStatKey(videoID)
+	c.local.delete(cardKey, statKey)
+	c.local.deletePrefix("feed:page:v1:")
+	pipe := c.client.Pipeline()
+	pipe.Del(ctx, cardKey, statKey)
+	if hidden {
+		pipe.SAdd(ctx, "feed:hidden:videos", videoID)
+	} else {
+		pipe.SRem(ctx, "feed:hidden:videos", videoID)
+	}
+	_, err := pipe.Exec(ctx)
+	if err != nil {
+		return err
+	}
+	var pageCursor uint64
+	for {
+		keys, next, scanErr := c.client.Scan(ctx, pageCursor, "feed:page:v1:*", 200).Result()
+		if scanErr != nil {
+			return scanErr
+		}
+		if len(keys) > 0 {
+			if deleteErr := c.client.Del(ctx, keys...).Err(); deleteErr != nil {
+				return deleteErr
+			}
+		}
+		pageCursor = next
+		if pageCursor == 0 {
+			break
+		}
+	}
+	// ponytail: moderation is low-volume; scan existing fanout indexes here, replace with a reverse index if takedown throughput becomes material.
+	needle := fmt.Sprintf(":%020d:", videoID)
+	for _, pattern := range []string{"feed:following:inbox:v2:*", "feed:following:author:v2:*"} {
+		var cursor uint64
+		for {
+			keys, next, scanErr := c.client.Scan(ctx, cursor, pattern, 200).Result()
+			if scanErr != nil {
+				return scanErr
+			}
+			for _, key := range keys {
+				var zcursor uint64
+				for {
+					members, znext, zerr := c.client.ZScan(ctx, key, zcursor, "*", 200).Result()
+					if zerr != nil {
+						return zerr
+					}
+					remove := make([]any, 0)
+					for index := 0; index+1 < len(members); index += 2 {
+						if strings.Contains(members[index], needle) {
+							remove = append(remove, members[index])
+						}
+					}
+					if len(remove) > 0 {
+						if zerr := c.client.ZRem(ctx, key, remove...).Err(); zerr != nil {
+							return zerr
+						}
+					}
+					zcursor = znext
+					if zcursor == 0 {
+						break
+					}
+				}
+			}
+			cursor = next
+			if cursor == 0 {
+				break
+			}
+		}
+	}
+	return nil
+}
+
 func videoStatToFeedStat(stat *domaininteraction.VideoStat) *domainfeed.FeedStat {
 	if stat == nil {
 		return nil

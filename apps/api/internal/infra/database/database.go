@@ -3,6 +3,8 @@ package infradatabase
 import (
 	"database/sql"
 	"fmt"
+	"net/url"
+	"strings"
 
 	infraconfig "FluxFeed/internal/infra/config"
 
@@ -12,13 +14,18 @@ import (
 // New 创建 MySQL 连接池，并用 Ping 提前验证配置是否可用。
 func New(dbcfg infraconfig.DatabaseConfig) (*sql.DB, error) {
 	// parseTime=true 让 DATETIME/TIMESTAMP 自动映射为 time.Time。
+	query := url.Values{"charset": {"utf8mb4"}, "parseTime": {"true"}, "loc": {"Local"}}
+	if tlsMode := strings.TrimSpace(dbcfg.TLS); tlsMode != "" {
+		query.Set("tls", tlsMode)
+	}
 	dsn := fmt.Sprintf(
-		"%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=true&loc=Local",
+		"%s:%s@tcp(%s:%d)/%s?%s",
 		dbcfg.User,
 		dbcfg.Password,
 		dbcfg.Host,
 		dbcfg.Port,
 		dbcfg.Name,
+		query.Encode(),
 	)
 
 	db, err := sql.Open("mysql", dsn)

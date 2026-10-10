@@ -13,8 +13,8 @@ brew install k6
 启动项目：
 
 ```bash
-cd /Users/sealos/repositories/FluxFeed/apps
-docker compose up -d --build
+cd /Users/fluxfeed/repositories/FluxFeed/apps
+docker compose --env-file ../.env up -d --build
 ```
 
 确认 API 正常：

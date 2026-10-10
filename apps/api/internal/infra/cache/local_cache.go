@@ -1,6 +1,7 @@
 package infracache
 
 import (
+	"strings"
 	"sync"
 	"time"
 )
@@ -93,6 +94,30 @@ func (c *localCache) setStale(key string, value []byte, freshTTL time.Duration, 
 		value:     append([]byte(nil), value...),
 		staleAt:   now.Add(freshTTL),
 		expiresAt: now.Add(hardTTL),
+	}
+}
+
+func (c *localCache) delete(keys ...string) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, key := range keys {
+		delete(c.entries, key)
+	}
+}
+
+func (c *localCache) deletePrefix(prefix string) {
+	if c == nil || prefix == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for key := range c.entries {
+		if strings.HasPrefix(key, prefix) {
+			delete(c.entries, key)
+		}
 	}
 }
 

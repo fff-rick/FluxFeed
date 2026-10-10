@@ -2,6 +2,7 @@ package interfaceshttpupload
 
 import (
 	inframetrics "FluxFeed/internal/infra/metrics"
+	interfaceshttpmiddleware "FluxFeed/internal/interfaces/http/middleware"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -91,6 +92,13 @@ type UploadProcessor interface {
 type Handler struct {
 	root      string
 	processor UploadProcessor
+	assets    AssetStore
+}
+
+type AssetStore interface {
+	RecordAsset(context.Context, int64, string, string, string) (int64, error)
+	AssetAccess(context.Context, string) (ownerID int64, kind, path, status string, err error)
+	HasPermission(context.Context, int64, string) (bool, error)
 }
 
 // uploadResponse 是上传成功后返回给前端的文件访问地址和元信息。
@@ -99,7 +107,10 @@ type uploadResponse struct {
 	Kind     string `json:"kind"`
 	Filename string `json:"filename"`
 	Size     int64  `json:"size"`
+	AssetID  int64  `json:"asset_id,omitempty"`
 }
+
+func (h *Handler) SetAssetStore(store AssetStore) { h.assets = store }
 
 // New 创建上传 Handler，root 是文件保存根目录。
 func New(root string) *Handler {
@@ -181,12 +192,54 @@ func (h *Handler) Create(c *gin.Context) {
 		}
 	}
 
+	url := "/uploads/" + kind + "/" + filename
+	var assetID int64
+	if h.assets != nil {
+		value, _ := c.Get(interfaceshttpmiddleware.ContextUserIDKey)
+		ownerID, _ := value.(int64)
+		assetID, err = h.assets.RecordAsset(c.Request.Context(), ownerID, kind, url, targetPath)
+		if err != nil {
+			resultErr = err
+			_ = os.Remove(targetPath)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to record upload"})
+			return
+		}
+	}
 	c.JSON(http.StatusCreated, uploadResponse{
-		URL:      "/uploads/" + kind + "/" + filename,
+		URL:      url,
 		Kind:     kind,
 		Filename: filename,
 		Size:     file.Size,
+		AssetID:  assetID,
 	})
+}
+
+// Serve prevents unreviewed media from being fetched through a guessed URL.
+func (h *Handler) Serve(c *gin.Context) {
+	url := c.Request.URL.Path
+	if h.assets == nil {
+		c.File(filepath.Join(h.root, strings.TrimPrefix(url, "/uploads/")))
+		return
+	}
+	ownerID, kind, path, status, err := h.assets.AssetAccess(c.Request.Context(), url)
+	if err != nil {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	value, _ := c.Get(interfaceshttpmiddleware.ContextUserIDKey)
+	userID, _ := value.(int64)
+	if kind != "avatar" && status != "published" {
+		allowed := userID == ownerID
+		if !allowed && userID > 0 {
+			allowed, _ = h.assets.HasPermission(c.Request.Context(), userID, "review.read")
+		}
+		if !allowed {
+			c.Status(http.StatusNotFound)
+			return
+		}
+	}
+	c.Header("X-Content-Type-Options", "nosniff")
+	c.File(path)
 }
 
 // normalizeKind 规范化文件分类，分类会影响保存目录和访问 URL。

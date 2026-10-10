@@ -22,20 +22,22 @@ type Repository struct {
 
 // videoWithStatModel 承接 video 与 video_stat 联表查询结果。
 type videoWithStatModel struct {
-	ID             int64
-	AuthorID       int64
-	Title          string
-	Description    string
-	MediaURL       string
-	CoverURL       string
-	Status         int
-	LikeCount      int
-	CommentCount   int
-	FavoriteCount  int
-	PublishedAt    *time.Time
-	IdempotencyKey *string
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	ID               int64
+	AuthorID         int64
+	Title            string
+	Description      string
+	MediaURL         string
+	CoverURL         string
+	Status           int
+	LikeCount        int
+	CommentCount     int
+	FavoriteCount    int
+	PublishedAt      *time.Time
+	IdempotencyKey   *string
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
+	ReviewReasonCode string
+	ReviewReason     string
 }
 
 // New 创建视频仓储实现。
@@ -98,7 +100,7 @@ func (r *Repository) Save(ctx context.Context, video *domainvideo.Video) error {
 		if r.outbox != nil {
 			source := applicationvideo.NewPublishedEvent(video)
 			if source == nil {
-				return applicationeventbus.ErrInvalidEvent
+				return nil
 			}
 			event, err := applicationeventbus.New(source.EventID, applicationeventbus.TypeVideoPublished, source.AuthorID, source.VideoID, source.OccurredAt, source)
 			if err != nil {
@@ -205,6 +207,21 @@ func (r *Repository) ListByAuthor(ctx context.Context, authorID int64, limit, of
 	return videos, nil
 }
 
+func (r *Repository) ListByAuthorAnyStatus(ctx context.Context, authorID int64, limit, offset int) ([]*domainvideo.Video, error) {
+	var models []videoWithStatModel
+	err := r.db.WithContext(ctx).Table("video AS v").Select(videoWithStatSelect()).
+		Joins("LEFT JOIN video_stat AS vs ON vs.video_id = v.id").Where("v.author_id = ?", authorID).
+		Order("v.created_at DESC").Order("v.id DESC").Limit(limit).Offset(offset).Scan(&models).Error
+	if err != nil {
+		return nil, err
+	}
+	videos := make([]*domainvideo.Video, 0, len(models))
+	for _, model := range models {
+		videos = append(videos, restoreVideo(model))
+	}
+	return videos, nil
+}
+
 // UpdateStatus 只更新状态字段，用于软删除。
 func (r *Repository) UpdateStatus(ctx context.Context, video *domainvideo.Video) error {
 	result := r.db.WithContext(ctx).
@@ -220,9 +237,30 @@ func (r *Repository) UpdateStatus(ctx context.Context, video *domainvideo.Video)
 	return nil
 }
 
+func (r *Repository) UpdateDraft(ctx context.Context, video *domainvideo.Video) error {
+	result := r.db.WithContext(ctx).Model(&VideoModel{}).Where("id=? AND author_id=? AND status=?", video.ID, video.AuthorID, domainvideo.StatusDraft).Updates(map[string]any{"title": video.Title, "description": video.Description, "media_url": video.MediaURL, "cover_url": video.CoverURL})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return domainvideo.ErrVideoNotFound
+	}
+	return nil
+}
+func (r *Repository) UpdateForReview(ctx context.Context, video *domainvideo.Video) error {
+	result := r.db.WithContext(ctx).Model(&VideoModel{}).Where("id=? AND author_id=? AND status IN ?", video.ID, video.AuthorID, []int{domainvideo.StatusPublished, domainvideo.StatusRejected, domainvideo.StatusOffline}).Updates(map[string]any{"title": video.Title, "description": video.Description, "media_url": video.MediaURL, "cover_url": video.CoverURL, "status": domainvideo.StatusPendingReview, "review_reason_code": "", "review_reason": ""})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return domainvideo.ErrVideoNotFound
+	}
+	return nil
+}
+
 // restoreVideo 把联表查询结果转换成领域视频对象。
 func restoreVideo(model videoWithStatModel) *domainvideo.Video {
-	return domainvideo.RestoreVideo(
+	video := domainvideo.RestoreVideo(
 		model.ID,
 		model.AuthorID,
 		model.Title,
@@ -238,11 +276,13 @@ func restoreVideo(model videoWithStatModel) *domainvideo.Video {
 		model.UpdatedAt,
 		idempotencyKeyValue(model.IdempotencyKey),
 	)
+	video.ReviewReasonCode, video.ReviewReason = model.ReviewReasonCode, model.ReviewReason
+	return video
 }
 
 // videoWithStatSelect 统一视频详情查询字段，避免多个查询写重复 SQL 字段列表。
 func videoWithStatSelect() string {
-	return "v.id, v.author_id, v.title, v.description, v.media_url, v.cover_url, v.status, COALESCE(vs.like_count, 0) AS like_count, COALESCE(vs.comment_count, 0) AS comment_count, COALESCE(vs.favorite_count, 0) AS favorite_count, v.published_at, v.idempotency_key, v.created_at, v.updated_at"
+	return "v.id, v.author_id, v.title, v.description, v.media_url, v.cover_url, v.status, COALESCE(vs.like_count, 0) AS like_count, COALESCE(vs.comment_count, 0) AS comment_count, COALESCE(vs.favorite_count, 0) AS favorite_count, v.published_at, v.idempotency_key, v.review_reason_code, v.review_reason, v.created_at, v.updated_at"
 }
 
 // idempotencyKeyPtr 将空幂等键存为 NULL，配合唯一索引允许普通创建多次执行。

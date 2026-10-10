@@ -286,7 +286,7 @@ go test ./...
 
 ```bash
 cd apps
-docker compose up -d --build
+docker compose --env-file ../.env up -d --build
 ```
 
 健康检查：

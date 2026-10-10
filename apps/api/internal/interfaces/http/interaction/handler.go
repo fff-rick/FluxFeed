@@ -71,7 +71,7 @@ func (h *Handler) CreateComment(c *gin.Context) {
 		writeInteractionError(c, err)
 		return
 	}
-	c.JSON(http.StatusCreated, commentResponseFromResult(result))
+	c.JSON(http.StatusAccepted, commentResponseFromResult(result))
 }
 
 // ListComments 查询指定视频的评论列表，分页参数来自 query。
@@ -89,7 +89,8 @@ func (h *Handler) ListComments(c *gin.Context) {
 		return
 	}
 
-	result, err := h.service.ListComments(c.Request.Context(), videoID, c.Query("cursor"), limit)
+	viewerID, _ := userIDFromContext(c)
+	result, err := h.service.ListCommentsForViewer(c.Request.Context(), viewerID, videoID, c.Query("cursor"), limit)
 	if err != nil {
 		writeInteractionError(c, err)
 		return
@@ -253,13 +254,37 @@ func commentListResponseFromResult(result *applicationinteraction.CommentListRes
 
 func commentResponseFromDomain(comment *domaininteraction.Comment) commentResponse {
 	return commentResponse{
-		ID:            comment.ID,
-		VideoID:       comment.VideoID,
-		UserID:        comment.UserID,
-		UserNickname:  comment.UserNickname,
-		UserAvatarURL: comment.UserAvatarURL,
-		Content:       comment.Content,
-		CreatedAt:     comment.CreatedAt,
+		ID:               comment.ID,
+		VideoID:          comment.VideoID,
+		UserID:           comment.UserID,
+		UserNickname:     comment.UserNickname,
+		UserAvatarURL:    comment.UserAvatarURL,
+		Status:           comment.Status,
+		StatusName:       commentStatusName(comment.Status),
+		CanAppeal:        comment.Status == domaininteraction.CommentStatusRejected,
+		ReviewReasonCode: comment.ReviewReasonCode,
+		ReviewReason:     comment.ReviewReason,
+		Content:          comment.Content,
+		CreatedAt:        comment.CreatedAt,
+	}
+}
+
+func commentStatusName(status int) string {
+	switch status {
+	case domaininteraction.CommentStatusNormal:
+		return "published"
+	case domaininteraction.CommentStatusDeleted:
+		return "deleted"
+	case domaininteraction.CommentStatusPendingReview:
+		return "pending_review"
+	case domaininteraction.CommentStatusRejected:
+		return "rejected"
+	case domaininteraction.CommentStatusOffline:
+		return "offline"
+	case domaininteraction.CommentStatusAppealPending:
+		return "appeal_pending"
+	default:
+		return "unknown"
 	}
 }
 
