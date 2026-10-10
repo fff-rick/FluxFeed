@@ -238,21 +238,19 @@ function AeroShards() {
   );
 }
 
-function DriftWall({ items, title = "最新视频", subtitle = "发现创作者们分享的精彩瞬间", onOpenAuthor }) {
+function DriftWall({ items, title = "最新视频", subtitle = "发现创作者们分享的精彩瞬间", onOpenAuthor, onLoadMore, hasMore, loadingMore }) {
   const [playing, setPlaying] = useState(null);
   const wallItems = items.length ? items : [];
   return (
     <div className="timeline-drift-shell">
       <div className="timeline-heading">
         <div><h1>{title}</h1><p>{subtitle}</p></div>
-        <span className="timeline-more">查看更多 <span>→</span></span>
+        {hasMore && <button className="timeline-more" onClick={onLoadMore} disabled={loadingMore}>{loadingMore ? "加载中" : "查看更多"} <span>→</span></button>}
       </div>
       <div className="drift-viewport">
         <div className="drift-wall">
-          {[0, 1, 2].map((column) => (
-            <div className={`drift-column drift-column-${column + 1}`} key={column}>
-              {[...wallItems, ...wallItems].filter((_, index) => index % 3 === column).map((item, index) => (
-                <article className="drift-card" key={`${column}-${item.video_id}-${index}`} onClick={() => setPlaying(item)}>
+          {wallItems.map((item, index) => (
+                <article className={`drift-card drift-card-${index % 7}`} key={item.video_id} onClick={() => setPlaying(item)}>
                   <img src={item.cover_url || image.stage} alt={item.title || "视频封面"} />
                   <div className="drift-card-shade" />
                   <span className="drift-play"><span className="material-symbols-outlined filled">play_arrow</span></span>
@@ -265,8 +263,6 @@ function DriftWall({ items, title = "最新视频", subtitle = "发现创作者�
                   </div>
                   <span className="drift-stat"><span className="material-symbols-outlined filled">favorite</span>{item.like_count || 0}</span>
                 </article>
-              ))}
-            </div>
           ))}
         </div>
       </div>
@@ -291,14 +287,50 @@ function LoginPage({ session, onNavigate }) {
   const [form, setForm] = useState({ account: "", password: "", nickname: "" });
   const [message, setMessage] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [registered, setRegistered] = useState(false);
+  const [capabilities, setCapabilities] = useState({ password_reset: false, email_verification: false, oauth_providers: [] });
+
+  useEffect(() => {
+    apiRequest("/api/auth/capabilities").then(setCapabilities).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    const hash = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+    const oauthCode = hash.get("oauth-code");
+    const verifyToken = hash.get("verify-email");
+    const resetToken = hash.get("reset-password");
+    const authError = hash.get("auth-error");
+    if (authError) setMessage(authError);
+    if (resetToken) setMode("reset");
+    if (verifyToken) {
+      setSubmitting(true);
+      apiRequest("/api/email-verifications", { method: "POST", body: { token: verifyToken } })
+        .then(() => setMessage("邮箱验证成功，现在可以安全地找回密码。"))
+        .catch((error) => setMessage(error.message || "邮箱验证链接无效或已过期"))
+        .finally(() => { setSubmitting(false); window.history.replaceState({}, "", "/auth"); });
+    }
+    if (oauthCode) {
+      setSubmitting(true);
+      apiRequest("/api/oauth/sessions", { method: "POST", body: { code: oauthCode } })
+        .then(async (tokenResponse) => {
+          const profile = await apiRequest("/api/users/me", { token: tokenResponse.access_token });
+          session.setAuth(tokenResponse.access_token, profile);
+          window.history.replaceState({}, "", "/auth");
+          onNavigate(roleHomeRoute(profile.role));
+        })
+        .catch((error) => setMessage(error.message || "第三方登录失败"))
+        .finally(() => setSubmitting(false));
+    }
+  }, []);
 
   async function handleSubmit(event) {
     event.preventDefault();
     setSubmitting(true);
     setMessage("");
     try {
+      let registration = null;
       if (mode === "register") {
-        await apiRequest("/api/users", {
+        registration = await apiRequest("/api/users", {
           method: "POST",
           body: {
             account: form.account.trim(),
@@ -317,13 +349,47 @@ function LoginPage({ session, onNavigate }) {
       const accessToken = tokenResponse.access_token;
       const profile = await apiRequest("/api/users/me", { token: accessToken });
       session.setAuth(accessToken, profile);
-	  onNavigate(roleHomeRoute(profile.role));
+      if (mode === "register" && capabilities.email_verification && !profile.email_verified) {
+        setRegistered(true);
+        setMessage(registration?.verification_email_sent ? "注册成功，验证邮件已发送。验证前仍可正常使用 FluxFeed。若未收到邮件，可重新发送。" : "注册成功，但验证邮件暂时未能发送。你仍可正常使用 FluxFeed，稍后请重新发送。 ");
+      } else {
+        onNavigate(roleHomeRoute(profile.role));
+      }
     } catch (error) {
       setMessage(error.message || "登录失败，请检查账号与密码");
     } finally {
       setSubmitting(false);
     }
   }
+
+  async function submitRecovery(event) {
+    event.preventDefault(); setSubmitting(true); setMessage("");
+    try {
+      await apiRequest("/api/password-reset-requests", { method: "POST", body: { account: form.account.trim() } });
+      setMessage("如果该邮箱已验证，重置链接会很快发送。请检查收件箱和垃圾邮件。 ");
+    } catch (error) { setMessage(error.message || "暂时无法发送重置邮件"); }
+    finally { setSubmitting(false); }
+  }
+
+  async function submitReset(event) {
+    event.preventDefault(); setSubmitting(true); setMessage("");
+    const token = new URLSearchParams(window.location.hash.replace(/^#/, "")).get("reset-password") || "";
+    try {
+      await apiRequest("/api/password-resets", { method: "POST", body: { token, password: form.password } });
+      window.history.replaceState({}, "", "/auth"); setMode("login"); setForm({ ...form, password: "" });
+      setMessage("密码已更新，请使用新密码登录。 ");
+    } catch (error) { setMessage(error.message || "重置链接无效或已过期"); }
+    finally { setSubmitting(false); }
+  }
+
+  async function resendVerification() {
+    setSubmitting(true); setMessage("");
+    try { await apiRequest("/api/users/me/email-verification-requests", { method: "POST", token: session.token }); setMessage("新的验证邮件已发送。 "); }
+    catch (error) { setMessage(error.message || "验证邮件发送失败"); }
+    finally { setSubmitting(false); }
+  }
+
+  const isRecovery = mode === "forgot" || mode === "reset";
 
   return (
     <main className="auth-page">
@@ -340,29 +406,34 @@ function LoginPage({ session, onNavigate }) {
           <div className="brand-block">
             <span className="brand-mark">GC</span>
             <div>
-              <h1>登录 FluxFeed</h1>
-              <p>连接后端账号、Feed 和个人资料。</p>
+              <h1>{mode === "forgot" ? "找回密码" : mode === "reset" ? "设置新密码" : "欢迎来到 FluxFeed"}</h1>
+              <p>{isRecovery ? "通过已验证邮箱恢复你的账号。" : "登录后继续发现值得停留的每一帧。"}</p>
             </div>
           </div>
 
-          <form className="auth-form" onSubmit={handleSubmit}>
-            <div className="auth-mode-tabs">
+          {registered ? <div className="auth-form auth-success">
+            {message && <p className="form-message">{message}</p>}
+            <button className="primary-button" type="button" disabled={submitting} onClick={resendVerification}>重新发送验证邮件</button>
+            <button className="auth-text-button" type="button" onClick={() => onNavigate(roleHomeRoute(session.user?.role))}>稍后验证，进入 FluxFeed</button>
+          </div> : <form className="auth-form" onSubmit={mode === "forgot" ? submitRecovery : mode === "reset" ? submitReset : handleSubmit}>
+            {!isRecovery && <div className="auth-mode-tabs">
               <button className={mode === "login" ? "active" : ""} type="button" onClick={() => setMode("login")}>
                 登录
               </button>
               <button className={mode === "register" ? "active" : ""} type="button" onClick={() => setMode("register")}>
                 注册
               </button>
-            </div>
-            <label>
-              <span>账号</span>
+            </div>}
+            {mode !== "reset" && <label>
+              <span>邮箱</span>
               <input
                 value={form.account}
                 onChange={(event) => setForm({ ...form, account: event.target.value })}
-                placeholder="请输入账号"
+                placeholder="name@example.com"
+                type="email"
                 autoComplete="username"
               />
-            </label>
+            </label>}
             {mode === "register" && (
               <label>
                 <span>昵称</span>
@@ -374,22 +445,30 @@ function LoginPage({ session, onNavigate }) {
                 />
               </label>
             )}
-            <label>
+            {mode !== "forgot" && <label>
               <span>密码</span>
               <input
                 value={form.password}
                 onChange={(event) => setForm({ ...form, password: event.target.value })}
-                placeholder="输入密码"
+                placeholder={mode === "reset" ? "至少 8 个字符的新密码" : "输入密码"}
                 type="password"
-                autoComplete="current-password"
+                autoComplete={mode === "reset" || mode === "register" ? "new-password" : "current-password"}
               />
-            </label>
+            </label>}
+            {mode === "login" && capabilities.password_reset && <button className="auth-text-button auth-forgot" type="button" onClick={() => { setMode("forgot"); setMessage(""); }}>忘记密码？</button>}
             {message && <p className="form-message">{message}</p>}
             <button className="primary-button" disabled={submitting}>
               <span className="material-symbols-outlined">login</span>
-              {submitting ? "提交中" : mode === "register" ? "注册并登录" : "登录"}
+              {submitting ? "提交中" : mode === "register" ? "注册并登录" : mode === "forgot" ? "发送重置链接" : mode === "reset" ? "更新密码" : "登录"}
             </button>
-          </form>
+            {isRecovery && <button className="auth-text-button" type="button" onClick={() => { window.history.replaceState({}, "", "/auth"); setMode("login"); setMessage(""); }}>返回登录</button>}
+            {!isRecovery && capabilities.oauth_providers.length > 0 && <div className="oauth-section">
+              <span>或使用以下方式登录</span>
+              <div className="oauth-buttons">{capabilities.oauth_providers.map((provider) => <button key={provider} type="button" onClick={() => window.location.assign(`/api/oauth/${provider}`)}>
+                <strong>{provider === "google" ? "G" : "GH"}</strong>{provider === "google" ? "Google" : "GitHub"}
+              </button>)}</div>
+            </div>}
+          </form>}
         </div>
       </section>
     </main>
@@ -663,10 +742,10 @@ function FeedPage({ feedScene, session, onNavigate }) {
   }, [onNavigate, session.clearAuth, session.token]);
 
   useEffect(() => {
-    if (feedState === "ready" && items.length > 0 && index >= items.length - 3) {
+    if (feedScene !== "timeline" && feedState === "ready" && items.length > 0 && index >= items.length - 3) {
       loadMoreFeed();
     }
-  }, [feedState, index, items.length, loadMoreFeed]);
+  }, [feedScene, feedState, index, items.length, loadMoreFeed]);
 
   useEffect(() => {
     return () => {
@@ -1049,6 +1128,7 @@ function FeedPage({ feedScene, session, onNavigate }) {
   }
 
   useEffect(() => {
+    if (feedScene === "timeline") return undefined;
     const handleKeyDown = (event) => {
       if (["ArrowDown", "j", "J"].includes(event.key)) {
         moveTo(Math.min(items.length - 1, index + 1));
@@ -1074,7 +1154,7 @@ function FeedPage({ feedScene, session, onNavigate }) {
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [index, items.length, setFavorite, setFollow, setLike, swipe]);
+  }, [feedScene, index, items.length, setFavorite, setFollow, setLike, swipe]);
 
   function goNext() {
     moveTo(Math.min(items.length - 1, index + 1));
@@ -1110,11 +1190,11 @@ function FeedPage({ feedScene, session, onNavigate }) {
       <section
         className={`feed-main ${feedScene === "timeline" ? "timeline-wall-main" : ""}`}
         ref={feedMainRef}
-        onWheel={handleWheel}
-        onPointerDown={handlePointerDown}
-        onPointerMove={handlePointerMove}
-        onPointerUp={handlePointerEnd}
-        onPointerCancel={handlePointerEnd}
+        onWheel={feedScene === "timeline" ? undefined : handleWheel}
+        onPointerDown={feedScene === "timeline" ? undefined : handlePointerDown}
+        onPointerMove={feedScene === "timeline" ? undefined : handlePointerMove}
+        onPointerUp={feedScene === "timeline" ? undefined : handlePointerEnd}
+        onPointerCancel={feedScene === "timeline" ? undefined : handlePointerEnd}
       >
         {feedScene === "timeline" && feedState === "ready" && items.length > 0 ? (
           <DriftWall
@@ -1122,6 +1202,9 @@ function FeedPage({ feedScene, session, onNavigate }) {
             title={currentFeedScene.label === "最新" ? "最新视频" : currentFeedScene.label}
             subtitle={feedScene === "timeline" ? "发现创作者们分享的精彩瞬间" : feedScene === "recommend" ? "为你发现值得停留的内容" : feedScene === "following" ? "看看你关注的创作者最近分享了什么" : "正在被大家喜欢的热门内容"}
             onOpenAuthor={(author) => openPublicProfile(author, onNavigate)}
+            onLoadMore={loadMoreFeed}
+            hasMore={hasMore}
+            loadingMore={loadingMore}
           />
         ) : <>
         {feedState === "loading" && <FeedMessage icon="hourglass_top" title={`正在加载${currentFeedScene.label}`} />}
@@ -3176,7 +3259,8 @@ async function apiRequest(path, options = {}) {
   }
 
   if (response.status === 204) return null;
-  return response.json();
+  const text = await response.text();
+  return text ? JSON.parse(text) : null;
 }
 
 async function uploadFile(file, kind, token, onProgress) {

@@ -3,6 +3,7 @@ package infraconfig
 import (
 	"errors"
 	"fmt"
+	"net/mail"
 	"net/url"
 	"os"
 	"strconv"
@@ -58,6 +59,16 @@ func applyEnvironment(cfg *Config) error {
 	setString(&cfg.Kafka.Password, "FLUXFEED_KAFKA_PASSWORD")
 	setString(&cfg.Kafka.TLSServerName, "FLUXFEED_KAFKA_TLS_SERVER_NAME")
 	setString(&cfg.RabbitMQ.URL, "FLUXFEED_RABBITMQ_URL")
+	setString(&cfg.Auth.PublicURL, "FLUXFEED_PUBLIC_URL")
+	setString(&cfg.Auth.SMTP.Host, "FLUXFEED_SMTP_HOST")
+	setString(&cfg.Auth.SMTP.Username, "FLUXFEED_SMTP_USERNAME")
+	setString(&cfg.Auth.SMTP.Password, "FLUXFEED_SMTP_PASSWORD")
+	setString(&cfg.Auth.SMTP.From, "FLUXFEED_SMTP_FROM")
+	setString(&cfg.Auth.SMTP.TLSMode, "FLUXFEED_SMTP_TLS_MODE")
+	setString(&cfg.Auth.Google.ClientID, "FLUXFEED_GOOGLE_CLIENT_ID")
+	setString(&cfg.Auth.Google.ClientSecret, "FLUXFEED_GOOGLE_CLIENT_SECRET")
+	setString(&cfg.Auth.GitHub.ClientID, "FLUXFEED_GITHUB_CLIENT_ID")
+	setString(&cfg.Auth.GitHub.ClientSecret, "FLUXFEED_GITHUB_CLIENT_SECRET")
 	if (cfg.Admin.Account == "") != (cfg.Admin.Password == "") {
 		return errors.New("ADMIN and ADMIN_PW must be configured together")
 	}
@@ -68,6 +79,7 @@ func applyEnvironment(cfg *Config) error {
 	for name, target := range map[string]*int{
 		"FLUXFEED_DATABASE_PORT": &cfg.Database.Port,
 		"FLUXFEED_REDIS_DB":      &cfg.Redis.DB,
+		"FLUXFEED_SMTP_PORT":     &cfg.Auth.SMTP.Port,
 	} {
 		if raw, ok := os.LookupEnv(name); ok {
 			value, err := strconv.Atoi(strings.TrimSpace(raw))
@@ -88,6 +100,49 @@ func applyEnvironment(cfg *Config) error {
 			}
 			*target = value
 		}
+	}
+	if err := validateAuthConfig(cfg); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateAuthConfig(cfg *Config) error {
+	if cfg.Auth.PublicURL == "" {
+		cfg.Auth.PublicURL = "http://localhost:5173"
+	}
+	publicURL, err := url.Parse(cfg.Auth.PublicURL)
+	if err != nil || publicURL.Host == "" || (publicURL.Scheme != "http" && publicURL.Scheme != "https") {
+		return errors.New("auth public_url must be an absolute http or https URL")
+	}
+	pairs := []struct{ name, first, second string }{
+		{"Google OAuth", cfg.Auth.Google.ClientID, cfg.Auth.Google.ClientSecret},
+		{"GitHub OAuth", cfg.Auth.GitHub.ClientID, cfg.Auth.GitHub.ClientSecret},
+	}
+	for _, pair := range pairs {
+		if (pair.first == "") != (pair.second == "") {
+			return fmt.Errorf("%s client id and secret must be configured together", pair.name)
+		}
+	}
+	smtpValues := []string{cfg.Auth.SMTP.Host, cfg.Auth.SMTP.From}
+	configured := false
+	for _, value := range smtpValues {
+		configured = configured || strings.TrimSpace(value) != ""
+	}
+	if configured && (cfg.Auth.SMTP.Host == "" || cfg.Auth.SMTP.From == "" || cfg.Auth.SMTP.Port <= 0) {
+		return errors.New("SMTP host, port and from must be configured together")
+	}
+	if configured {
+		if _, err := mail.ParseAddress(cfg.Auth.SMTP.From); err != nil {
+			return errors.New("SMTP from must be a valid email address or name <email> value")
+		}
+	}
+	mode := strings.ToLower(strings.TrimSpace(cfg.Auth.SMTP.TLSMode))
+	if configured && mode != "starttls" && mode != "implicit" {
+		return errors.New("SMTP tls_mode must be starttls or implicit")
+	}
+	if (cfg.Auth.SMTP.Username == "") != (cfg.Auth.SMTP.Password == "") {
+		return errors.New("SMTP username and password must be configured together")
 	}
 	return nil
 }
@@ -137,6 +192,10 @@ func validateProduction(cfg *Config) error {
 				invalid = append(invalid, "RabbitMQ must use amqps in production")
 			}
 		}
+	}
+	authEnabled := cfg.Auth.SMTP.Host != "" || cfg.Auth.Google.ClientID != "" || cfg.Auth.GitHub.ClientID != ""
+	if authEnabled && !strings.HasPrefix(strings.ToLower(cfg.Auth.PublicURL), "https://") {
+		invalid = append(invalid, "FLUXFEED_PUBLIC_URL must use https when account recovery or OAuth is enabled")
 	}
 	if len(invalid) > 0 {
 		return fmt.Errorf("%w: %s", ErrInvalidProductionConfig, strings.Join(invalid, "; "))

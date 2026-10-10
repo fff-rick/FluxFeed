@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	applicationaccount "FluxFeed/internal/application/account"
 	domainaccount "FluxFeed/internal/domain/account"
@@ -29,6 +31,7 @@ type accountProfileResponse struct {
 	FollowingCount int    `json:"following_count"`
 	FollowerCount  int    `json:"follower_count"`
 	WorkCount      int    `json:"work_count"`
+	EmailVerified  bool   `json:"email_verified"`
 }
 
 type accountTokenResponse struct {
@@ -49,17 +52,23 @@ type publicAccountProfileResponse struct {
 
 // memoryAccountRepo 是账号测试用的内存仓储，模拟真实 Repository 的唯一账号索引。
 type memoryAccountRepo struct {
-	mu        sync.Mutex
-	nextID    int64
-	byID      map[int64]*domainaccount.User
-	byAccount map[string]int64
+	mu         sync.Mutex
+	nextID     int64
+	byID       map[int64]*domainaccount.User
+	byAccount  map[string]int64
+	identities map[string]int64
+	tokens     map[string]domainaccount.ActionToken
+	usedTokens map[string]bool
 }
 
 func newMemoryAccountRepo() *memoryAccountRepo {
 	return &memoryAccountRepo{
-		nextID:    1,
-		byID:      map[int64]*domainaccount.User{},
-		byAccount: map[string]int64{},
+		nextID:     1,
+		byID:       map[int64]*domainaccount.User{},
+		byAccount:  map[string]int64{},
+		identities: map[string]int64{},
+		tokens:     map[string]domainaccount.ActionToken{},
+		usedTokens: map[string]bool{},
 	}
 }
 
@@ -118,6 +127,68 @@ func (r *memoryAccountRepo) UpdateProfile(ctx context.Context, user *domainaccou
 	return nil
 }
 
+func (r *memoryAccountRepo) UpdatePassword(ctx context.Context, user *domainaccount.User) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	stored, exists := r.byID[user.ID]
+	if !exists {
+		return domainaccount.ErrUserNotFound
+	}
+	stored.Password = user.Password
+	return nil
+}
+
+func (r *memoryAccountRepo) MarkEmailVerified(ctx context.Context, userID int64, verifiedAt time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	stored, exists := r.byID[userID]
+	if !exists {
+		return domainaccount.ErrUserNotFound
+	}
+	stored.EmailVerifiedAt = &verifiedAt
+	return nil
+}
+
+func (r *memoryAccountRepo) FindByExternalIdentity(ctx context.Context, provider, subject string) (*domainaccount.User, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	id, exists := r.identities[provider+":"+subject]
+	if !exists {
+		return nil, domainaccount.ErrUserNotFound
+	}
+	return cloneUser(r.byID[id]), nil
+}
+
+func (r *memoryAccountRepo) LinkExternalIdentity(ctx context.Context, identity domainaccount.ExternalIdentity) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	key := identity.Provider + ":" + identity.ProviderSubject
+	if _, exists := r.identities[key]; exists {
+		return domainaccount.ErrExternalIdentityExists
+	}
+	r.identities[key] = identity.UserID
+	return nil
+}
+
+func (r *memoryAccountRepo) SaveActionToken(ctx context.Context, token domainaccount.ActionToken) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.tokens[token.Purpose+":"+token.TokenHash] = token
+	return nil
+}
+
+func (r *memoryAccountRepo) ConsumeActionToken(ctx context.Context, purpose, tokenHash string, now time.Time) (int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	key := purpose + ":" + tokenHash
+	token, exists := r.tokens[key]
+	if !exists || r.usedTokens[key] || !token.ExpiresAt.After(now) {
+		return 0, domainaccount.ErrInvalidActionToken
+	}
+	r.usedTokens[key] = true
+	return token.UserID, nil
+}
+
 func (r *memoryAccountRepo) SetStatsForTest(userID int64, followingCount int, followerCount int, workCount int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -137,6 +208,80 @@ func cloneUser(user *domainaccount.User) *domainaccount.User {
 	return &cloned
 }
 
+type fakeMailer struct{ bodies []string }
+
+func (m *fakeMailer) Send(ctx context.Context, to, subject, body string) error {
+	m.bodies = append(m.bodies, body)
+	return nil
+}
+
+func tokenFromMail(t *testing.T, body, marker string) string {
+	t.Helper()
+	parts := strings.SplitN(body, marker, 2)
+	if len(parts) != 2 {
+		t.Fatalf("mail does not contain %s: %s", marker, body)
+	}
+	return strings.SplitN(parts[1], "\"", 2)[0]
+}
+
+func TestEmailVerificationAndPasswordReset(t *testing.T) {
+	repo := newMemoryAccountRepo()
+	jwtManager, err := infrajwt.NewManager("test-secret", "15m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mailer := &fakeMailer{}
+	service := applicationaccount.New(repo, jwtManager, applicationaccount.WithMailer(mailer, "https://fluxfeed.example"))
+	profile, err := service.Register(context.Background(), " User@Example.COM ", "12345678", "User")
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if profile.Account != "user@example.com" || profile.EmailVerified || !profile.VerificationEmailSent || len(mailer.bodies) != 1 {
+		t.Fatalf("unexpected registration: %+v", profile)
+	}
+	verifyToken := tokenFromMail(t, mailer.bodies[0], "#verify-email=")
+	if err := service.VerifyEmail(context.Background(), verifyToken); err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if err := service.VerifyEmail(context.Background(), verifyToken); err == nil {
+		t.Fatal("expected verification token to be single use")
+	}
+	if err := service.RequestPasswordReset(context.Background(), profile.Account); err != nil {
+		t.Fatalf("request reset: %v", err)
+	}
+	resetToken := tokenFromMail(t, mailer.bodies[1], "#reset-password=")
+	if err := service.ResetPassword(context.Background(), resetToken, "new-password"); err != nil {
+		t.Fatalf("reset: %v", err)
+	}
+	if _, err := service.Login(context.Background(), profile.Account, "12345678"); err == nil {
+		t.Fatal("old password should fail")
+	}
+	if _, err := service.Login(context.Background(), profile.Account, "new-password"); err != nil {
+		t.Fatalf("new password login: %v", err)
+	}
+}
+
+func TestOAuthCreatesAndReusesVerifiedAccount(t *testing.T) {
+	repo := newMemoryAccountRepo()
+	jwtManager, _ := infrajwt.NewManager("test-secret", "15m")
+	service := applicationaccount.New(repo, jwtManager)
+	profile := &applicationaccount.OAuthProfile{Subject: "google-42", Email: "oauth@example.com", Nickname: "OAuth User", EmailVerified: true}
+	code, err := service.CompleteOAuth(context.Background(), "google", profile)
+	if err != nil {
+		t.Fatalf("complete oauth: %v", err)
+	}
+	if _, err := service.ExchangeOAuthSession(context.Background(), code); err != nil {
+		t.Fatalf("exchange oauth: %v", err)
+	}
+	if _, err := service.ExchangeOAuthSession(context.Background(), code); err == nil {
+		t.Fatal("expected oauth code to be single use")
+	}
+	linked, err := repo.FindByExternalIdentity(context.Background(), "google", "google-42")
+	if err != nil || linked.Account != "oauth@example.com" || !linked.EmailVerified() {
+		t.Fatalf("unexpected linked user: %+v, %v", linked, err)
+	}
+}
+
 // TestAccountAPIFlow 覆盖注册、重复注册、登录、读取资料、更新资料和登出完整流程。
 func TestAccountAPIFlow(t *testing.T) {
 	router := newAccountRouter(t)
@@ -145,7 +290,7 @@ func TestAccountAPIFlow(t *testing.T) {
 		router,
 		http.MethodPost,
 		"/api/users",
-		`{"account":"test","password":"12345678","nickname":"tester"}`,
+		`{"account":"test@example.com","password":"12345678","nickname":"tester"}`,
 		"",
 	)
 	requireStatus(t, registerResponse, http.StatusCreated)
@@ -155,7 +300,7 @@ func TestAccountAPIFlow(t *testing.T) {
 	if created.ID == 0 {
 		t.Fatalf("expected created user id")
 	}
-	if created.Account != "test" || created.Nickname != "tester" || created.Status != domainaccount.StatusNormal || created.Role != domainaccount.RoleUser {
+	if created.Account != "test@example.com" || created.Nickname != "tester" || created.Status != domainaccount.StatusNormal || created.Role != domainaccount.RoleUser {
 		t.Fatalf("unexpected register response: %+v", created)
 	}
 
@@ -163,7 +308,7 @@ func TestAccountAPIFlow(t *testing.T) {
 		router,
 		http.MethodPost,
 		"/api/users",
-		`{"account":"test","password":"12345678","nickname":"tester"}`,
+		`{"account":"test@example.com","password":"12345678","nickname":"tester"}`,
 		"",
 	)
 	requireStatus(t, duplicateResponse, http.StatusConflict)
@@ -172,7 +317,7 @@ func TestAccountAPIFlow(t *testing.T) {
 		router,
 		http.MethodPost,
 		"/api/sessions",
-		`{"account":"test","password":"12345678"}`,
+		`{"account":"TEST@Example.com","password":"12345678"}`,
 		"",
 	)
 	requireStatus(t, loginResponse, http.StatusOK)
@@ -188,7 +333,7 @@ func TestAccountAPIFlow(t *testing.T) {
 
 	var profile accountProfileResponse
 	decodeJSON(t, meResponse, &profile)
-	if profile.ID != created.ID || profile.Account != "test" || profile.Nickname != "tester" {
+	if profile.ID != created.ID || profile.Account != "test@example.com" || profile.Nickname != "tester" {
 		t.Fatalf("unexpected profile response: %+v", profile)
 	}
 
@@ -219,10 +364,14 @@ func TestAccountAPIValidation(t *testing.T) {
 		router,
 		http.MethodPost,
 		"/api/users",
-		`{"account":"test","password":"","nickname":"tester"}`,
+		`{"account":"test@example.com","password":"","nickname":"tester"}`,
 		"",
 	)
 	requireStatus(t, registerResponse, http.StatusBadRequest)
+	invalidEmailResponse := performJSONRequest(router, http.MethodPost, "/api/users", `{"account":"not-an-email","password":"12345678","nickname":"tester"}`, "")
+	requireStatus(t, invalidEmailResponse, http.StatusBadRequest)
+	resetRequestResponse := performJSONRequest(router, http.MethodPost, "/api/password-reset-requests", `{"account":"missing@example.com"}`, "")
+	requireStatus(t, resetRequestResponse, http.StatusAccepted)
 
 	loginResponse := performJSONRequest(
 		router,
@@ -259,7 +408,7 @@ func TestPublicAccountProfile(t *testing.T) {
 		router,
 		http.MethodPost,
 		"/api/users",
-		`{"account":"creator","password":"12345678","nickname":"creator name"}`,
+		`{"account":"creator@example.com","password":"12345678","nickname":"creator name"}`,
 		"",
 	)
 	requireStatus(t, registerResponse, http.StatusCreated)
@@ -286,7 +435,7 @@ func registerAndLogin(t *testing.T, router *gin.Engine) string {
 		router,
 		http.MethodPost,
 		"/api/users",
-		`{"account":"login-user","password":"12345678","nickname":"login tester"}`,
+		`{"account":"login-user@example.com","password":"12345678","nickname":"login tester"}`,
 		"",
 	)
 	requireStatus(t, registerResponse, http.StatusCreated)
@@ -295,7 +444,7 @@ func registerAndLogin(t *testing.T, router *gin.Engine) string {
 		router,
 		http.MethodPost,
 		"/api/sessions",
-		`{"account":"login-user","password":"12345678"}`,
+		`{"account":"login-user@example.com","password":"12345678"}`,
 		"",
 	)
 	requireStatus(t, loginResponse, http.StatusOK)
@@ -334,11 +483,17 @@ func newAccountRouterWithRepo(t *testing.T) (*gin.Engine, *memoryAccountRepo) {
 	sessions := api.Group("/sessions")
 	sessions.POST("", handler.Login)
 	sessions.DELETE("/current", authMiddleware, handler.Logout)
+	api.GET("/auth/capabilities", handler.Capabilities)
+	api.POST("/email-verifications", handler.VerifyEmail)
+	api.POST("/password-reset-requests", handler.RequestPasswordReset)
+	api.POST("/password-resets", handler.ResetPassword)
+	api.POST("/oauth/sessions", handler.ExchangeOAuthSession)
 
 	users := api.Group("/users")
 	users.POST("", handler.Register)
 	users.GET("/me", authMiddleware, handler.Me)
 	users.PATCH("/me", authMiddleware, handler.UpdateMe)
+	users.POST("/me/email-verification-requests", authMiddleware, handler.RequestEmailVerification)
 	users.GET("/:userId", handler.Get)
 
 	return router, repo

@@ -12,6 +12,28 @@ type Config struct {
 	Kafka       KafkaConfig      `yaml:"kafka"`
 	RabbitMQ    RabbitMQConfig   `yaml:"rabbitmq"`
 	Governance  GovernanceConfig `yaml:"governance"`
+	Auth        AuthConfig       `yaml:"auth"`
+}
+
+type AuthConfig struct {
+	PublicURL string              `yaml:"public_url"`
+	SMTP      SMTPConfig          `yaml:"smtp"`
+	Google    OAuthProviderConfig `yaml:"google"`
+	GitHub    OAuthProviderConfig `yaml:"github"`
+}
+
+type SMTPConfig struct {
+	Host     string `yaml:"host"`
+	Port     int    `yaml:"port"`
+	Username string `yaml:"username"`
+	Password string `yaml:"password"`
+	From     string `yaml:"from"`
+	TLSMode  string `yaml:"tls_mode"`
+}
+
+type OAuthProviderConfig struct {
+	ClientID     string `yaml:"client_id"`
+	ClientSecret string `yaml:"client_secret"`
 }
 
 // AdminConfig configures the bootstrap administrator created at API startup.
