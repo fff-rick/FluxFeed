@@ -13,6 +13,7 @@ import (
 	applicationrelation "FluxFeed/internal/application/relation"
 	applicationvideo "FluxFeed/internal/application/video"
 	domainfeed "FluxFeed/internal/domain/feed"
+	infraauth "FluxFeed/internal/infra/auth"
 	infracache "FluxFeed/internal/infra/cache"
 	infraconfig "FluxFeed/internal/infra/config"
 	infrajwt "FluxFeed/internal/infra/jwt"
@@ -84,7 +85,17 @@ func Register(g *gin.Engine, cfg *infraconfig.Config, db *sql.DB) error {
 
 	// 下面按领域模块组装依赖：Repository -> Service -> Handler。
 	accountRepo := infraaccount.New(gormDB)
-	accountService := applicationaccount.New(accountRepo, jwtManager)
+	accountOptions := []applicationaccount.Option{applicationaccount.WithPublicURL(cfg.Auth.PublicURL)}
+	if cfg.Auth.SMTP.Host != "" {
+		accountOptions = append(accountOptions, applicationaccount.WithMailer(infraauth.NewSMTPMailer(cfg.Auth.SMTP), cfg.Auth.PublicURL))
+	}
+	if infraauth.OAuthProviderEnabled(cfg.Auth.Google.ClientID, cfg.Auth.Google.ClientSecret) {
+		accountOptions = append(accountOptions, applicationaccount.WithOAuthProvider(infraauth.NewGoogleProvider(cfg.Auth.Google.ClientID, cfg.Auth.Google.ClientSecret, cfg.Auth.PublicURL)))
+	}
+	if infraauth.OAuthProviderEnabled(cfg.Auth.GitHub.ClientID, cfg.Auth.GitHub.ClientSecret) {
+		accountOptions = append(accountOptions, applicationaccount.WithOAuthProvider(infraauth.NewGitHubProvider(cfg.Auth.GitHub.ClientID, cfg.Auth.GitHub.ClientSecret, cfg.Auth.PublicURL)))
+	}
+	accountService := applicationaccount.New(accountRepo, jwtManager, accountOptions...)
 	accountHandler := interfaceshttpaccount.New(accountService)
 	videoRepo := infravideo.New(gormDB)
 	feedRepo := infrafeed.New(gormDB)
@@ -200,12 +211,20 @@ func Register(g *gin.Engine, cfg *infraconfig.Config, db *sql.DB) error {
 	sessions := api.Group("/sessions")
 	sessions.POST("", accountHandler.Login)
 	sessions.DELETE("/current", authMiddleware, accountHandler.Logout)
+	api.GET("/auth/capabilities", accountHandler.Capabilities)
+	api.POST("/email-verifications", accountHandler.VerifyEmail)
+	api.POST("/password-reset-requests", accountHandler.RequestPasswordReset)
+	api.POST("/password-resets", accountHandler.ResetPassword)
+	api.GET("/oauth/:provider", accountHandler.BeginOAuth)
+	api.GET("/oauth/:provider/callback", accountHandler.FinishOAuth)
+	api.POST("/oauth/sessions", accountHandler.ExchangeOAuthSession)
 
 	// 用户资源承载注册、当前用户资料和用户作品列表。
 	users := api.Group("/users")
 	users.POST("", accountHandler.Register)
 	users.GET("/me", authMiddleware, accountHandler.Me)
 	users.PATCH("/me", authMiddleware, accountHandler.UpdateMe)
+	users.POST("/me/email-verification-requests", authMiddleware, accountHandler.RequestEmailVerification)
 	users.GET("/me/videos", authMiddleware, videoHandler.ListMine)
 	users.PUT("/me/following/:targetUserId", authMiddleware, relationHandler.Follow)
 	users.DELETE("/me/following/:targetUserId", authMiddleware, relationHandler.Unfollow)

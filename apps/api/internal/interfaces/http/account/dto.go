@@ -20,6 +20,20 @@ type UpdateProfileRequest struct {
 	Bio       *string `json:"bio"`
 }
 
+type actionTokenRequest struct {
+	Token string `json:"token"`
+}
+type passwordResetRequest struct {
+	Account string `json:"account"`
+}
+type passwordResetConfirmRequest struct {
+	Token    string `json:"token"`
+	Password string `json:"password"`
+}
+type oauthSessionRequest struct {
+	Code string `json:"code"`
+}
+
 // 账号登录响应
 type tokenResponse struct {
 	AccessToken      string `json:"access_token"`
@@ -29,16 +43,18 @@ type tokenResponse struct {
 
 // 用户信息响应
 type userProfileResponse struct {
-	ID             int64  `json:"id"`
-	Account        string `json:"account"`
-	Nickname       string `json:"nickname"`
-	AvatarURL      string `json:"avatar_url"`
-	Bio            string `json:"bio"`
-	Status         int    `json:"status"`
-	Role           string `json:"role"`
-	FollowingCount int    `json:"following_count"`
-	FollowerCount  int    `json:"follower_count"`
-	WorkCount      int    `json:"work_count"`
+	ID                    int64  `json:"id"`
+	Account               string `json:"account"`
+	Nickname              string `json:"nickname"`
+	AvatarURL             string `json:"avatar_url"`
+	Bio                   string `json:"bio"`
+	Status                int    `json:"status"`
+	Role                  string `json:"role"`
+	FollowingCount        int    `json:"following_count"`
+	FollowerCount         int    `json:"follower_count"`
+	WorkCount             int    `json:"work_count"`
+	EmailVerified         bool   `json:"email_verified"`
+	VerificationEmailSent bool   `json:"verification_email_sent,omitempty"`
 }
 
 // 公开用户信息响应，隐藏账号、角色和状态等内部字段。

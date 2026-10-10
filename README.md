@@ -28,10 +28,11 @@ FluxFeed 基于 Go 与 React 构建，围绕「内容供给 → Feed 分发 → 
 ## 产品预览
 
 <p align="center">
-  <img src="apps/web/public/assets/fluxfeed-visual.png" alt="FluxFeed Web 产品界面：登录页与视频发现页" width="100%" />
+  <img src="apps/web/public/assets/fluxfeed-auth.png" alt="FluxFeed 邮箱登录与注册页" width="49%" />
+  <img src="apps/web/public/assets/fluxfeed-timeline.png" alt="FluxFeed 静态错落的最新视频墙" width="49%" />
 </p>
 
-Web 客户端覆盖登录注册、沉浸式 Feed、点赞收藏评论、关注关系、个人主页、消息通知与视频发布，并接入播放配置、后续视频预加载和 QoS 上报。
+Web 客户端覆盖邮箱登录注册与验证、邮件找回密码、Google / GitHub OAuth、静态错落的最新视频墙、沉浸式个性化 Feed、点赞收藏评论、关注关系、个人主页、消息通知与视频发布，并接入播放配置、后续视频预加载和 QoS 上报。
 
 ## 项目能力
 
@@ -79,6 +80,8 @@ docker compose --env-file ../.env up -d --build
 
 `ADMIN` 与 `ADMIN_PW` 是管理后台的启动账号。API 每次启动都会幂等创建该账号（已存在时同步密码与管理员权限），登录成功后自动进入 `/admin`。部署环境请务必使用随机强密码，不要沿用本地开发值。
 
+邮件找回和第三方登录是可选能力：在 `.env` 中完整配置 `FLUXFEED_SMTP_*` 后启用邮箱验证与密码重置，完整配置对应的 `FLUXFEED_GOOGLE_*` 或 `FLUXFEED_GITHUB_*` 后显示该登录入口。OAuth 回调地址分别为 `${FLUXFEED_PUBLIC_URL}/api/oauth/google/callback` 和 `${FLUXFEED_PUBLIC_URL}/api/oauth/github/callback`；未配置的入口不会出现在登录页。
+
 启动后访问：
 
 | 服务 | 地址 |
@@ -89,7 +92,7 @@ docker compose --env-file ../.env up -d --build
 | RabbitMQ | `http://127.0.0.1:15672` |
 | Prometheus | `http://127.0.0.1:9090` |
 | Grafana | `http://127.0.0.1:13000` |
-| Tempo | `http://127.0.0.1:3200` |
+| Tempo | `http://127.0.0.1:13200`（可通过 `TEMPO_PORT` 修改） |
 
 停止服务：
 
