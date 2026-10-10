@@ -2,6 +2,7 @@ package domainaccount
 
 import (
 	"strings"
+	"time"
 
 	"golang.org/x/crypto/bcrypt"
 )
@@ -15,18 +16,34 @@ const (
 
 // User 是账号聚合根，保存登录凭证、展示资料和权限角色。
 type User struct {
-	ID        int64
-	Account   string
-	Password  string
-	Nickname  string
-	AvatarURL string
-	Bio       string
-	Status    int
-	Role      string
+	ID              int64
+	Account         string
+	Password        string
+	Nickname        string
+	AvatarURL       string
+	Bio             string
+	Status          int
+	Role            string
+	EmailVerifiedAt *time.Time
 	// FollowingCount 和 FollowerCount 来自关系模块统计表，用于个人页展示。
 	FollowingCount int
 	FollowerCount  int
 	WorkCount      int
+}
+
+func (u *User) EmailVerified() bool { return u.EmailVerifiedAt != nil }
+
+func (u *User) SetPassword(password string) error {
+	password = strings.TrimSpace(password)
+	if len(password) < 8 {
+		return ErrWeakPassword
+	}
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return ErrHashPasswordFailed
+	}
+	u.Password = string(hashedPassword)
+	return nil
 }
 
 // New 创建新用户，负责输入清洗、必填校验和密码哈希。

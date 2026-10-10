@@ -67,6 +67,8 @@ func autoMigrateModels(db *gorm.DB) error {
 	for attempt := 0; attempt < 4; attempt++ {
 		err = db.AutoMigrate(
 			&infraaccount.UserModel{},
+			&infraaccount.ExternalIdentityModel{},
+			&infraaccount.ActionTokenModel{},
 			&infraembedding.VideoEmbeddingModel{},
 			&infraeventbus.ConsumerEventModel{},
 			&infrarecommendation.UserInterestModel{},

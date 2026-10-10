@@ -7,6 +7,12 @@ jwt:
 internal:
   token: ""
 
+auth:
+  public_url: "http://localhost:5173"
+  smtp: {host: "", port: 587, username: "", password: "", from: "", tls_mode: "starttls"}
+  google: {client_id: "", client_secret: ""}
+  github: {client_id: "", client_secret: ""}
+
 governance:
   request_timeout: "3s"
   recommendation_timeout: "500ms"

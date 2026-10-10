@@ -4,6 +4,7 @@ import (
 	domainaccount "FluxFeed/internal/domain/account"
 	"context"
 	"errors"
+	"net/mail"
 	"strings"
 	"time"
 )
@@ -21,8 +22,11 @@ type TokenSigner interface {
 
 // Service 编排账号用例：注册、登录、读取资料、更新资料。
 type Service struct {
-	repo   domainaccount.Repository
-	signer TokenSigner
+	repo      domainaccount.Repository
+	signer    TokenSigner
+	mailer    Mailer
+	publicURL string
+	providers map[string]OAuthProvider
 }
 
 // LoginResult 是登录成功后返回给 HTTP 层的 token 数据。
@@ -34,27 +38,41 @@ type LoginResult struct {
 
 // Profile 是应用层对外暴露的用户资料视图，屏蔽密码等敏感字段。
 type Profile struct {
-	ID             int64
-	Account        string
-	Nickname       string
-	AvatarURL      string
-	Bio            string
-	Status         int
-	Role           string
-	FollowingCount int
-	FollowerCount  int
-	WorkCount      int
+	ID                    int64
+	Account               string
+	Nickname              string
+	AvatarURL             string
+	Bio                   string
+	Status                int
+	Role                  string
+	FollowingCount        int
+	FollowerCount         int
+	WorkCount             int
+	EmailVerified         bool
+	VerificationEmailSent bool
 }
 
-func New(repo domainaccount.Repository, signer TokenSigner) *Service {
-	return &Service{
-		repo:   repo,
-		signer: signer,
+func New(repo domainaccount.Repository, signer TokenSigner, options ...Option) *Service {
+	service := &Service{
+		repo:      repo,
+		signer:    signer,
+		providers: map[string]OAuthProvider{},
 	}
+	for _, option := range options {
+		option(service)
+	}
+	return service
 }
 
 // Register 创建新用户：领域层负责校验和加密密码，仓储层负责持久化。
 func (s *Service) Register(ctx context.Context, account, password, nickname string) (*Profile, error) {
+	account, err := normalizeEmail(account)
+	if err != nil {
+		return nil, err
+	}
+	if len(strings.TrimSpace(password)) < 8 {
+		return nil, domainaccount.ErrWeakPassword
+	}
 	user, err := domainaccount.New(account, password, nickname)
 	if err != nil {
 		return nil, err
@@ -67,7 +85,9 @@ func (s *Service) Register(ctx context.Context, account, password, nickname stri
 		}
 		return nil, ErrSaveAccountFailed
 	}
-	return profileFromUser(user), nil
+	profile := profileFromUser(user)
+	profile.VerificationEmailSent = s.mailer != nil && s.SendEmailVerification(ctx, user.ID) == nil
+	return profile, nil
 }
 
 // Login 完成账号密码登录，认证通过后签发访问 token。
@@ -75,6 +95,9 @@ func (s *Service) Login(ctx context.Context, account, password string) (*LoginRe
 	account = strings.TrimSpace(account)
 	if account == "" {
 		return nil, domainaccount.ErrEmptyAccount
+	}
+	if strings.Contains(account, "@") {
+		account = strings.ToLower(account)
 	}
 
 	user, err := s.repo.FindByAccount(ctx, account)
@@ -177,5 +200,15 @@ func profileFromUser(user *domainaccount.User) *Profile {
 		FollowingCount: user.FollowingCount,
 		FollowerCount:  user.FollowerCount,
 		WorkCount:      user.WorkCount,
+		EmailVerified:  user.EmailVerified(),
 	}
+}
+
+func normalizeEmail(value string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	parsed, err := mail.ParseAddress(value)
+	if err != nil || parsed.Address != value || !strings.Contains(value, "@") {
+		return "", domainaccount.ErrInvalidEmail
+	}
+	return value, nil
 }

@@ -52,6 +52,37 @@ func TestAdminEnvironmentMustBeComplete(t *testing.T) {
 	}
 }
 
+func TestAuthEnvironmentAndPartialConfiguration(t *testing.T) {
+	t.Setenv("FLUXFEED_PUBLIC_URL", "https://fluxfeed.example")
+	t.Setenv("FLUXFEED_GOOGLE_CLIENT_ID", "google-client")
+	t.Setenv("FLUXFEED_GOOGLE_CLIENT_SECRET", "google-secret")
+	t.Setenv("FLUXFEED_SMTP_HOST", "smtp.example.com")
+	t.Setenv("FLUXFEED_SMTP_PORT", "465")
+	t.Setenv("FLUXFEED_SMTP_FROM", "FluxFeed <no-reply@example.com>")
+	t.Setenv("FLUXFEED_SMTP_TLS_MODE", "implicit")
+	cfg := &Config{}
+	if err := applyEnvironment(cfg); err != nil {
+		t.Fatalf("apply auth environment: %v", err)
+	}
+	if cfg.Auth.PublicURL != "https://fluxfeed.example" || cfg.Auth.SMTP.Port != 465 || cfg.Auth.Google.ClientID != "google-client" {
+		t.Fatalf("auth environment was not applied: %+v", cfg.Auth)
+	}
+
+	t.Setenv("FLUXFEED_GOOGLE_CLIENT_SECRET", "")
+	if err := applyEnvironment(&Config{}); err == nil {
+		t.Fatal("expected partial OAuth configuration to fail")
+	}
+}
+
+func TestAuthRejectsInvalidSMTPFrom(t *testing.T) {
+	config := &Config{Auth: AuthConfig{SMTP: SMTPConfig{
+		Host: "smtp.example.com", Port: 587, From: "FluxFeed no-reply@example.com", TLSMode: "starttls",
+	}}}
+	if err := validateAuthConfig(config); err == nil {
+		t.Fatal("expected invalid SMTP from error")
+	}
+}
+
 func TestProductionRejectsWeakOrInsecureConfig(t *testing.T) {
 	cfg := &Config{
 		Environment: "production",
